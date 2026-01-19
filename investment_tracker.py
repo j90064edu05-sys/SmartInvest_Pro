@@ -72,7 +72,7 @@ except ImportError:
 # ==========================================
 class ResourceManager:
     def __init__(self, folder_name="SmartInvest_Pro"):
-        # [核心修復] 最優先初始化所有屬性為 None，防止任何路徑下的 AttributeError
+        # [核心修復] 在最開頭明確初始化所有屬性，絕對防止 AttributeError
         self.folder_id = None
         self.drive_service = None
         self.gmail_service = None
@@ -89,6 +89,7 @@ class ResourceManager:
         if self.is_colab:
             self._setup_colab_paths()
         else:
+            # GitHub Actions 下 base_path 會是當前執行目錄
             self.base_path = os.getcwd()
             
         if HAS_GCP_LIBS:
@@ -114,14 +115,14 @@ class ResourceManager:
         token_path = os.path.join(self.base_path, 'token.json')
         cred_path = os.path.join(self.base_path, 'credentials.json')
         
-        # A. 嘗試讀取舊 Token
+        # 嘗試從本地讀取 token.json (GitHub Secret 還原出的檔案)
         if os.path.exists(token_path):
             try:
                 creds = Credentials.from_authorized_user_file(token_path, self.SCOPES)
             except:
                 creds = None
 
-        # B. 檢查 Token 有效性
+        # 檢查 Token 有效性與自動刷新
         if creds and not all(s in creds.scopes for s in self.SCOPES):
             creds = None
 
@@ -134,12 +135,12 @@ class ResourceManager:
             
             if not creds:
                 if not os.path.exists(cred_path):
-                    print(">>> [系統] 執行環境不具備憑證檔案，切換為本地模式。")
+                    print(">>> [提示] 本地無憑證檔，切換至無雲端功能模式執行。")
                     return
 
-                # GitHub Actions 環境下無法互動
+                # GitHub Actions 是非互動環境，無法執行手動授權流程
                 if os.environ.get('GITHUB_ACTIONS'):
-                    print(">>> [警告] GitHub Actions 環境下 Token 失效且無法手動授權。")
+                    print(">>> [錯誤] GitHub Actions 環境下 Token 已過期且無法手動授權，請更新 Repository Secret 中的 GCP_TOKEN_BASE64。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
@@ -156,14 +157,14 @@ class ResourceManager:
             with open(token_path, 'w') as token:
                 token.write(creds.to_json())
         
-        # C. 建立服務客戶端
+        # 建立服務客戶端
         try:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.gmail_service = build('gmail', 'v1', credentials=creds)
             # 在服務成功建立後才獲取資料夾 ID
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> [警告] Google 服務授權不完全 (Drive 存取可能受限): {e}")
+            print(f">>> [警告] Google 服務授權不完全 (Drive 存取受限): {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -180,18 +181,18 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
-        # 1. 優先讀取本地檔案 (對應 GitHub Secrets 產生的檔案)
+        # 1. 優先檢查本地檔案 (這對應到 GitHub Secret 直接還原出來的 config.json)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
-                    print(f">>> [系統] 從本地載入設定檔: {filename}")
+                    print(f">>> [系統] 成功從本地載入設定檔: {filename}")
                     return json.load(f)
-            except:
-                pass
+            except Exception as e:
+                print(f">>> [警告] 本地設定檔讀取失敗: {e}")
         
-        # 2. 若本地沒有且雲端服務可用，才從 Drive 讀取
-        if self.drive_service and self.folder_id:
+        # 2. 只有在本地找不到時，才嘗試從雲端讀取
+        if self.drive_service and getattr(self, 'folder_id', None):
             try:
                 query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
@@ -216,7 +217,7 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
-        # 始終嘗試儲存一份到本地環境
+        # 儲存到本地環境
         local_path = os.path.join(self.base_path, filename)
         try:
             with open(local_path, 'w', encoding='utf-8') as f:
@@ -224,8 +225,8 @@ class ResourceManager:
         except:
             pass
 
-        # 同步至雲端 (僅在 folder_id 存在時執行)
-        if self.drive_service and self.folder_id:
+        # 雲端同步 (僅在服務可用且 folder_id 存在時)
+        if self.drive_service and getattr(self, 'folder_id', None):
             try:
                 with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
                 media = MediaFileUpload("temp.tmp", mimetype=mimetype)
@@ -251,7 +252,7 @@ class ResourceManager:
 
     def send_email_with_chart(self, to, subject, body_html, image_bytes=None):
         if not self.gmail_service or not to:
-            print(">>> [警告] Gmail 服務未啟動或未設定收件人，無法發送郵件。")
+            print(">>> [警告] Gmail 服務未啟動或未設定收件人，跳過發信。")
             return
         try:
             msg = MIMEMultipart('related')
@@ -305,7 +306,7 @@ class HybridInvestSystem:
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
         
-        # GitHub Actions 環境下避免反向同步 config.json 到 Drive，減少 API 呼叫
+        # GitHub Actions 環境下避免反向同步到雲端 Drive，以保持單向安全性
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -431,6 +432,7 @@ class HybridInvestSystem:
                     is_last = (date.month != (date + timedelta(days=5)).month)
                     dc = False
                     for lb in range(1, 4):
+                        if idx-lb<0: continue
                         if df.iloc[idx-lb]['DIF'] > df.iloc[idx-lb]['DEA'] and df.iloc[idx-lb+1]['DIF'] < df.iloc[idx-lb+1]['DEA']:
                             dc = True; break
                     if (dc and price < prev['Close'] and row['OSC'] < 0) or is_last:
