@@ -72,7 +72,7 @@ except ImportError:
 # ==========================================
 class ResourceManager:
     def __init__(self, folder_name="SmartInvest_Pro"):
-        # [核心修復] 最優先初始化所有可能用到的屬性，防止 AttributeError
+        # [核心修復] 最優先初始化所有屬性為 None，防止任何路徑下的 AttributeError
         self.folder_id = None
         self.drive_service = None
         self.gmail_service = None
@@ -114,12 +114,14 @@ class ResourceManager:
         token_path = os.path.join(self.base_path, 'token.json')
         cred_path = os.path.join(self.base_path, 'credentials.json')
         
+        # A. 嘗試讀取舊 Token
         if os.path.exists(token_path):
             try:
                 creds = Credentials.from_authorized_user_file(token_path, self.SCOPES)
             except:
                 creds = None
 
+        # B. 檢查 Token 有效性
         if creds and not all(s in creds.scopes for s in self.SCOPES):
             creds = None
 
@@ -132,12 +134,12 @@ class ResourceManager:
             
             if not creds:
                 if not os.path.exists(cred_path):
-                    print(">>> [提示] 找不到 credentials.json，僅能使用本地模式執行。")
+                    print(">>> [系統] 執行環境不具備憑證檔案，切換為本地模式。")
                     return
 
-                # GitHub Actions 環境下無法執行互動式授權
+                # GitHub Actions 環境下無法互動
                 if os.environ.get('GITHUB_ACTIONS'):
-                    print(">>> [錯誤] GitHub Actions 環境下 token.json 無效且無法手動授權。請更新 Secrets。")
+                    print(">>> [警告] GitHub Actions 環境下 Token 失效且無法手動授權。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
@@ -154,13 +156,14 @@ class ResourceManager:
             with open(token_path, 'w') as token:
                 token.write(creds.to_json())
         
+        # C. 建立服務客戶端
         try:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.gmail_service = build('gmail', 'v1', credentials=creds)
-            # 在服務建立後才去獲取資料夾 ID
+            # 在服務成功建立後才獲取資料夾 ID
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> Google 服務授權不完全: {e}")
+            print(f">>> [警告] Google 服務授權不完全 (Drive 存取可能受限): {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -182,6 +185,7 @@ class ResourceManager:
         if os.path.exists(local_path):
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
+                    print(f">>> [系統] 從本地載入設定檔: {filename}")
                     return json.load(f)
             except:
                 pass
@@ -197,6 +201,7 @@ class ResourceManager:
                     downloader = MediaIoBaseDownload(fh, request)
                     done = False
                     while not done: _, done = downloader.next_chunk()
+                    print(f">>> [雲端] 從 Google Drive 載入設定檔: {filename}")
                     return json.loads(fh.getvalue().decode('utf-8'))
             except:
                 pass
