@@ -71,8 +71,13 @@ except ImportError:
 # 1. 雲端與通訊資源管理員 (ResourceManager)
 # ==========================================
 class ResourceManager:
+    # [加固] 類別層級定義，確保屬性永遠存在，防止 AttributeError
+    folder_id = None
+    drive_service = None
+    gmail_service = None
+
     def __init__(self, folder_name="SmartInvest_Pro"):
-        # [核心修復] 最優先初始化所有屬性為 None，絕對防止 AttributeError
+        # 初始化實例屬性
         self.folder_id = None
         self.drive_service = None
         self.gmail_service = None
@@ -89,7 +94,7 @@ class ResourceManager:
         if self.is_colab:
             self._setup_colab_paths()
         else:
-            # GitHub Actions 環境下，檔案操作主要在目前目錄
+            # GitHub Actions 或 本機環境
             self.base_path = os.getcwd()
             
         if HAS_GCP_LIBS:
@@ -133,11 +138,11 @@ class ResourceManager:
             
             if not creds:
                 if not os.path.exists(cred_path):
-                    print(">>> [系統] 環境中不具備憑證檔案，切換至無雲端同步模式。")
+                    print(">>> [系統] 環境中不具備 credentials.json，切換至本地模式。")
                     return
 
                 if os.environ.get('GITHUB_ACTIONS'):
-                    print(">>> [錯誤] GitHub Actions 環境下 Token 失效。請更新 GCP_TOKEN_BASE64 Secret。")
+                    print(">>> [錯誤] GitHub Actions 環境下 Token 失效且無法手動授權。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
@@ -159,7 +164,7 @@ class ResourceManager:
             self.gmail_service = build('gmail', 'v1', credentials=creds)
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> Google 服務授權不完全 (Drive 存取受限): {e}")
+            print(f">>> [警告] Google 服務啟動失敗 (Drive 功能停用): {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -176,22 +181,23 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
-        # [修復重點] 1. 優先檢查本地檔案 (這對應到 GitHub Secret 直接還原出來的 config.json)
+        # 1. 優先檢查本地檔案 (GitHub Secret 還原路徑)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
-            print(f">>> [系統] 偵測到本地載入設定檔: {local_path}")
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
-                    print(f">>> [系統] 成功從本地載入設定檔: {filename}")
+                    print(f">>> [系統] 成功從本地路徑載入設定檔: {local_path}")
                     return json.load(f)
             except Exception as e:
-                print(f">>> [警告] 本地設定檔讀取失敗: {e}")
+                print(f">>> [錯誤] 本地設定檔損壞: {e}")
         
-        # [修復重點] 2. 只有在本地找不到，且雲端服務可用時，才嘗試雲端查詢，防止屬性錯誤
-        if self.drive_service and getattr(self, 'folder_id', None):
-            print(f">>> [系統] 無偵測到本地載入設定檔: {local_path}")
+        # 2. 安全檢查：只有在本地找不到，且 Drive 服務與 FolderID 都存在時才雲端查詢
+        drive = getattr(self, 'drive_service', None)
+        fid = getattr(self, 'folder_id', None)
+        
+        if drive and fid:
             try:
-                query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
+                query = f"name = '{filename}' and '{fid}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
                 if res:
                     request = self.drive_service.files().get_media(fileId=res[0]['id'])
@@ -214,7 +220,7 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
-        # 儲存到本地
+        # 始終嘗試儲存到本地環境
         local_path = os.path.join(self.base_path, filename)
         try:
             with open(local_path, 'w', encoding='utf-8') as f:
@@ -222,17 +228,20 @@ class ResourceManager:
         except:
             pass
 
-        # 雲端同步 (僅在屬性存在時)
-        if self.drive_service and getattr(self, 'folder_id', None):
+        # 雲端同步 (使用安全檢查)
+        drive = getattr(self, 'drive_service', None)
+        fid = getattr(self, 'folder_id', None)
+        
+        if drive and fid:
             try:
                 with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
                 media = MediaFileUpload("temp.tmp", mimetype=mimetype)
-                query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
+                query = f"name = '{filename}' and '{fid}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
                 if res:
                     self.drive_service.files().update(fileId=res[0]['id'], media_body=media).execute()
                 else:
-                    meta = {'name': filename, 'parents': [self.folder_id]}
+                    meta = {'name': filename, 'parents': [fid]}
                     self.drive_service.files().create(body=meta, media_body=media).execute()
                 os.remove("temp.tmp")
             except:
@@ -241,15 +250,16 @@ class ResourceManager:
     def read_web_csv(self, url):
         if not url or "http" not in url: return None
         try:
-            print(f">>> 讀取交易記錄明細...")
+            print(f">>> 讀取交易資料...")
             df = pd.read_csv(url)
             return df
         except:
             return None
 
     def send_email_with_chart(self, to, subject, body_html, image_bytes=None):
-        if not self.gmail_service or not to:
-            print(">>> [警告] Gmail 服務未啟動，無法發送郵件。")
+        gmail = getattr(self, 'gmail_service', None)
+        if not gmail or not to:
+            print(">>> [警告] Gmail 服務未授權或無收件人，略過發信。")
             return
         try:
             msg = MIMEMultipart('related')
@@ -303,7 +313,7 @@ class HybridInvestSystem:
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
         
-        # GitHub Actions 環境下不執行反向同步回雲端，減少寫入權限問題
+        # GitHub Actions 環境下不執行反向寫入雲端
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -462,7 +472,6 @@ class HybridInvestSystem:
                             portfolio[t]["cost"] += base_budget
                             war_chest -= base_budget
                             extra_done[t].add("K_OVER")
-                            history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "K值超賣", "金額": int(base_budget), "股數": round(sh, 2), "成交價": round(price, 2)})
                     for ma in ['MA60', 'MA120']:
                         mv = row[ma]
                         if price >= mv and (price-mv)/mv < 0.02 and (row['Low'] <= mv or df.iloc[idx-1]['Low'] <= mv):
@@ -635,9 +644,7 @@ class HybridInvestSystem:
                     html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else:
                     s_color = "red" if sugg_amt_str != "-" else "black"
-                    fw = "bold" if sugg_amt_str != "-" else "normal"
-                    html += f"<td style='color:{s_color}; font-weight:{fw};'>{suggestion}</td>"
-                    html += f"<td style='color:{s_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
+                    html += f"<td style='color:{s_color};'>{suggestion}</td><td style='color:{s_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
 
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
