@@ -1,0 +1,52 @@
+name: 智投系統每日排程
+
+on:
+  # 1. 定時觸發：設定為台灣時間 14:30 (UTC 06:30)，避開股市剛收盤的壅塞
+  schedule:
+    - cron: '30 6 * * 1-5'  # UTC時間，週一至週五
+  
+  # 2. 手動觸發：允許在 GitHub 網頁上按按鈕手動測試
+  workflow_dispatch:
+
+jobs:
+  run-investment-tracker:
+    runs-on: ubuntu-latest
+    
+    # 設定時區為台北
+    env:
+      TZ: Asia/Taipei
+
+    steps:
+      # 步驟 1: 下載您的程式碼
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 步驟 2: 設定 Python 環境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          cache: 'pip'
+
+      # 步驟 3: 安裝套件
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # 確保字型下載工具存在
+          pip install gdown
+
+      # 步驟 4: 還原 GCP 憑證 (從 GitHub Secrets 解碼)
+      # 這是最關鍵的一步，讓雲端環境擁有您的身份
+      - name: Restore Credentials
+        run: |
+          echo "${{ secrets.GCP_CREDENTIALS_BASE64 }}" | base64 -d > credentials.json
+          echo "${{ secrets.GCP_TOKEN_BASE64 }}" | base64 -d > token.json
+          
+          # 如果有 config.json 也建議放入 Secrets，或是確保它存在於 repo 中
+          # 這裡假設 config.json 包含敏感的 Email，所以也可以用 Secret 還原
+          # echo "${{ secrets.APP_CONFIG_JSON }}" > config.json 
+
+      # 步驟 5: 執行主程式
+      - name: Run Tracker Script
+        run: python investment_tracker.py
