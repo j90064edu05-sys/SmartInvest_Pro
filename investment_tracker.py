@@ -179,6 +179,7 @@ class ResourceManager:
         # [修復重點] 1. 優先檢查本地檔案 (這對應到 GitHub Secret 直接還原出來的 config.json)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
+            print(f">>> [系統] 偵測到本地載入設定檔: {local_path}")
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
                     print(f">>> [系統] 成功從本地載入設定檔: {filename}")
@@ -188,6 +189,7 @@ class ResourceManager:
         
         # [修復重點] 2. 只有在本地找不到，且雲端服務可用時，才嘗試雲端查詢，防止屬性錯誤
         if self.drive_service and getattr(self, 'folder_id', None):
+            print(f">>> [系統] 無偵測到本地載入設定檔: {local_path}")
             try:
                 query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
