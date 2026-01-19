@@ -72,7 +72,7 @@ except ImportError:
 # ==========================================
 class ResourceManager:
     def __init__(self, folder_name="SmartInvest_Pro"):
-        # [核心修復] 在最開頭明確初始化所有屬性，絕對防止 AttributeError
+        # [核心修復] 最優先初始化所有屬性為 None，絕對防止 AttributeError
         self.folder_id = None
         self.drive_service = None
         self.gmail_service = None
@@ -89,7 +89,7 @@ class ResourceManager:
         if self.is_colab:
             self._setup_colab_paths()
         else:
-            # GitHub Actions 下 base_path 會是當前執行目錄
+            # GitHub Actions 環境下，檔案操作主要在目前目錄
             self.base_path = os.getcwd()
             
         if HAS_GCP_LIBS:
@@ -115,14 +115,12 @@ class ResourceManager:
         token_path = os.path.join(self.base_path, 'token.json')
         cred_path = os.path.join(self.base_path, 'credentials.json')
         
-        # 嘗試從本地讀取 token.json (GitHub Secret 還原出的檔案)
         if os.path.exists(token_path):
             try:
                 creds = Credentials.from_authorized_user_file(token_path, self.SCOPES)
             except:
                 creds = None
 
-        # 檢查 Token 有效性與自動刷新
         if creds and not all(s in creds.scopes for s in self.SCOPES):
             creds = None
 
@@ -135,12 +133,11 @@ class ResourceManager:
             
             if not creds:
                 if not os.path.exists(cred_path):
-                    print(">>> [提示] 本地無憑證檔，切換至無雲端功能模式執行。")
+                    print(">>> [系統] 環境中不具備憑證檔案，切換至無雲端同步模式。")
                     return
 
-                # GitHub Actions 是非互動環境，無法執行手動授權流程
                 if os.environ.get('GITHUB_ACTIONS'):
-                    print(">>> [錯誤] GitHub Actions 環境下 Token 已過期且無法手動授權，請更新 Repository Secret 中的 GCP_TOKEN_BASE64。")
+                    print(">>> [錯誤] GitHub Actions 環境下 Token 失效。請更新 GCP_TOKEN_BASE64 Secret。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
@@ -157,14 +154,12 @@ class ResourceManager:
             with open(token_path, 'w') as token:
                 token.write(creds.to_json())
         
-        # 建立服務客戶端
         try:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.gmail_service = build('gmail', 'v1', credentials=creds)
-            # 在服務成功建立後才獲取資料夾 ID
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> [警告] Google 服務授權不完全 (Drive 存取受限): {e}")
+            print(f">>> Google 服務授權不完全 (Drive 存取受限): {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -181,7 +176,7 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
-        # 1. 優先檢查本地檔案 (這對應到 GitHub Secret 直接還原出來的 config.json)
+        # [修復重點] 1. 優先檢查本地檔案 (這對應到 GitHub Secret 直接還原出來的 config.json)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
             try:
@@ -191,7 +186,7 @@ class ResourceManager:
             except Exception as e:
                 print(f">>> [警告] 本地設定檔讀取失敗: {e}")
         
-        # 2. 只有在本地找不到時，才嘗試從雲端讀取
+        # [修復重點] 2. 只有在本地找不到，且雲端服務可用時，才嘗試雲端查詢，防止屬性錯誤
         if self.drive_service and getattr(self, 'folder_id', None):
             try:
                 query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
@@ -217,7 +212,7 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
-        # 儲存到本地環境
+        # 儲存到本地
         local_path = os.path.join(self.base_path, filename)
         try:
             with open(local_path, 'w', encoding='utf-8') as f:
@@ -225,7 +220,7 @@ class ResourceManager:
         except:
             pass
 
-        # 雲端同步 (僅在服務可用且 folder_id 存在時)
+        # 雲端同步 (僅在屬性存在時)
         if self.drive_service and getattr(self, 'folder_id', None):
             try:
                 with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
@@ -244,7 +239,7 @@ class ResourceManager:
     def read_web_csv(self, url):
         if not url or "http" not in url: return None
         try:
-            print(f">>> 讀取交易資料...")
+            print(f">>> 讀取交易記錄明細...")
             df = pd.read_csv(url)
             return df
         except:
@@ -252,7 +247,7 @@ class ResourceManager:
 
     def send_email_with_chart(self, to, subject, body_html, image_bytes=None):
         if not self.gmail_service or not to:
-            print(">>> [警告] Gmail 服務未啟動或未設定收件人，跳過發信。")
+            print(">>> [警告] Gmail 服務未啟動，無法發送郵件。")
             return
         try:
             msg = MIMEMultipart('related')
@@ -271,7 +266,7 @@ class ResourceManager:
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
             self.gmail_service.users().messages().send(userId='me', body={'raw': raw}).execute()
-            print(f">>> [通知] 郵件已發送至: {to}")
+            print(f">>> [通知] 報告郵件已發送至: {to}")
         except Exception as e:
             print(f">>> [錯誤] 郵件發送失敗: {e}")
 
@@ -306,7 +301,7 @@ class HybridInvestSystem:
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
         
-        # GitHub Actions 環境下避免反向同步到雲端 Drive，以保持單向安全性
+        # GitHub Actions 環境下不執行反向同步回雲端，減少寫入權限問題
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -440,7 +435,7 @@ class HybridInvestSystem:
                         portfolio[t]["shares"] += sh
                         portfolio[t]["cost"] += base_budget
                         month_base_done[t] = True
-                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_budget), "股數": round(sh, 2)})
+                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_budget), "股數": round(sh, 2), "成交價": round(price, 2)})
 
                 avg = portfolio[t]["cost"] / portfolio[t]["shares"] if portfolio[t]["shares"] > 0 else 0
                 mode = t_conf["mode"]
@@ -455,7 +450,7 @@ class HybridInvestSystem:
                                 portfolio[t]["cost"] += amt
                                 war_chest -= amt
                                 extra_done[t].add(s_name)
-                                history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"金字塔_{s_name}", "金額": int(amt), "股數": round(sh, 2)})
+                                history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"金字塔_{s_name}", "金額": int(amt), "股數": round(sh, 2), "成交價": round(price, 2)})
                                 break
                 elif mode == "TECH":
                     if (row['K'] < 20 or row['WK'] < 20) and "K_OVER" not in extra_done[t]:
@@ -465,6 +460,7 @@ class HybridInvestSystem:
                             portfolio[t]["cost"] += base_budget
                             war_chest -= base_budget
                             extra_done[t].add("K_OVER")
+                            history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "K值超賣", "金額": int(base_budget), "股數": round(sh, 2), "成交價": round(price, 2)})
                     for ma in ['MA60', 'MA120']:
                         mv = row[ma]
                         if price >= mv and (price-mv)/mv < 0.02 and (row['Low'] <= mv or df.iloc[idx-1]['Low'] <= mv):
@@ -475,7 +471,7 @@ class HybridInvestSystem:
                                     portfolio[t]["cost"] += base_budget
                                     war_chest -= base_budget
                                     extra_done[t].add(ma)
-                                    history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"{ma}有撐", "金額": int(base_budget), "股數": round(sh, 2)})
+                                    history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"{ma}有撐", "金額": int(base_budget), "股數": round(sh, 2), "成交價": round(price, 2)})
 
         res_df = pd.DataFrame(history)
         return res_df, war_chest
@@ -520,6 +516,7 @@ class HybridInvestSystem:
         if mode == "REAL":
             type_cols = [c for c in ['策略', '類別', '類型'] if c in df.columns]
             price_col = next((c for c in ['價格', '成交價', 'Price'] if c in df.columns), None)
+            
             is_fixed = pd.Series(False, index=df.index)
             if type_cols:
                 for col in type_cols:
@@ -636,7 +633,9 @@ class HybridInvestSystem:
                     html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else:
                     s_color = "red" if sugg_amt_str != "-" else "black"
-                    html += f"<td style='color:{s_color};'>{suggestion}</td><td style='color:{s_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
+                    fw = "bold" if sugg_amt_str != "-" else "normal"
+                    html += f"<td style='color:{s_color}; font-weight:{fw};'>{suggestion}</td>"
+                    html += f"<td style='color:{s_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
 
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0

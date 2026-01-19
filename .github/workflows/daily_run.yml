@@ -42,7 +42,7 @@ jobs:
         run: |
           echo "${{ secrets.GCP_CREDENTIALS_BASE64 }}" | base64 -d > credentials.json
           echo "${{ secrets.GCP_TOKEN_BASE64 }}" | base64 -d > token.json
-          echo "${{ secrets.APP_CONFIG_JSON }}" > config.json 
+          echo '${{ secrets.APP_CONFIG_JSON }}' > config.json
           # 如果有 config.json 也建議放入 Secrets，或是確保它存在於 repo 中
           # 這裡假設 config.json 包含敏感的 Email，所以也可以用 Secret 還原
 
