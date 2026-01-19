@@ -194,7 +194,8 @@ class ResourceManager:
         # 2. 安全檢查：只有在本地找不到，且 Drive 服務與 FolderID 都存在時才雲端查詢
         drive = getattr(self, 'drive_service', None)
         fid = getattr(self, 'folder_id', None)
-        
+        print(f">>> drive_service: {drive}")
+        print(f">>> folder_id: {fid}")
         if drive and fid:
             try:
                 query = f"name = '{filename}' and '{fid}' in parents and trashed = false"
