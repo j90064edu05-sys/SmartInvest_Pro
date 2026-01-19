@@ -43,7 +43,10 @@ font_filename = "taipei_sans_tc_beta.ttf"
 if not os.path.exists(font_filename):
     print(">>> 偵測到缺少中文字型，正在下載台北思源黑體...")
     url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
-    gdown.download(url, font_filename, quiet=False)
+    try:
+        gdown.download(url, font_filename, quiet=True)
+    except:
+        pass
 
 if os.path.exists(font_filename):
     try:
@@ -51,11 +54,8 @@ if os.path.exists(font_filename):
         font_prop = fm.FontProperties(fname=font_filename)
         plt.rcParams['font.family'] = font_prop.get_name()
         plt.rcParams['axes.unicode_minus'] = False
-        print(f">>> 中文字型已載入: {font_prop.get_name()}")
-    except Exception as e:
-        print(f">>> [警告] 字型載入失敗: {e}")
-else:
-    print(">>> [警告] 字型下載失敗，圖表中文可能顯示為亂碼。")
+    except:
+        pass
 
 try:
     from googleapiclient.discovery import build
@@ -76,6 +76,7 @@ class ResourceManager:
         self.is_colab = self._detect_colab()
         self.drive_service = None
         self.gmail_service = None
+        self.folder_id = None
         self.base_path = ""
         
         self.SCOPES = [
@@ -96,7 +97,7 @@ class ResourceManager:
         try:
             import google.colab
             return True
-        except ImportError:
+        except:
             return False
 
     def _setup_colab_paths(self):
@@ -115,26 +116,28 @@ class ResourceManager:
         if os.path.exists(token_path):
             try:
                 creds = Credentials.from_authorized_user_file(token_path, self.SCOPES)
-            except: creds = None
+            except:
+                creds = None
 
         if creds and not all(s in creds.scopes for s in self.SCOPES):
             creds = None
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                try: creds.refresh(Request())
-                except: creds = None
+                try:
+                    creds.refresh(Request())
+                except:
+                    creds = None
             
             if not creds:
                 if not os.path.exists(cred_path):
-                    print(f">>> [警告] 找不到 {cred_path}，無法啟動 Gmail。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
                 if self.is_colab:
                     flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
                     auth_url, _ = flow.authorization_url(prompt='consent')
-                    print(f"\n請點擊連結授權 Gmail: {auth_url}")
+                    print(f"\n授權連結: {auth_url}")
                     code = input("請輸入驗證碼: ")
                     flow.fetch_token(code=code)
                     creds = flow.credentials
@@ -147,16 +150,34 @@ class ResourceManager:
         try:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.gmail_service = build('gmail', 'v1', credentials=creds)
-        except Exception as e:
-            print(f">>> 服務初始化失敗: {e}")
+            self._ensure_folder_exists()
+        except:
+            pass
+
+    def _ensure_folder_exists(self):
+        if not self.drive_service: return
+        try:
+            query = f"name = '{self.folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res = self.drive_service.files().list(q=query).execute().get('files', [])
+            if not res:
+                meta = {'name': self.folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
+                file = self.drive_service.files().create(body=meta, fields='id').execute()
+                self.folder_id = file.get('id')
+            else:
+                self.folder_id = res[0]['id']
+        except:
+            pass
 
     def load_local_config(self, filename="config.json"):
-        path = os.path.join(self.base_path, filename)
-        if self.is_colab:
-            if not os.path.exists(path): return None
-            with open(path, 'r', encoding='utf-8') as f: return json.load(f)
-        else:
-            if self.drive_service:
+        # 優先讀取本地檔案 (對應 GitHub Secrets 產生的檔案)
+        local_path = os.path.join(self.base_path, filename)
+        if os.path.exists(local_path):
+            with open(local_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        
+        # 若本地沒有，且是 Colab 或 雲端模式，才從 Drive 抓
+        if self.drive_service and self.folder_id:
+            try:
                 query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
                 if res:
@@ -166,9 +187,9 @@ class ResourceManager:
                     done = False
                     while not done: _, done = downloader.next_chunk()
                     return json.loads(fh.getvalue().decode('utf-8'))
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f: return json.load(f)
-            return None
+            except:
+                pass
+        return None
 
     def save_file_to_drive(self, filename, data):
         content = ""
@@ -179,20 +200,26 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
-        if self.is_colab:
-            path = os.path.join(self.base_path, filename)
-            with open(path, 'w', encoding='utf-8') as f: f.write(content)
-        elif self.drive_service and self.folder_id:
-            with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
-            media = MediaFileUpload("temp.tmp", mimetype=mimetype)
-            query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
-            res = self.drive_service.files().list(q=query).execute().get('files', [])
-            if res:
-                self.drive_service.files().update(fileId=res[0]['id'], media_body=media).execute()
-            else:
-                meta = {'name': filename, 'parents': [self.folder_id]}
-                self.drive_service.files().create(body=meta, media_body=media).execute()
-            os.remove("temp.tmp")
+        # 始終嘗試儲存一份到本地
+        local_path = os.path.join(self.base_path, filename)
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # 雲端同步
+        if self.drive_service and self.folder_id:
+            try:
+                with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
+                media = MediaFileUpload("temp.tmp", mimetype=mimetype)
+                query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
+                res = self.drive_service.files().list(q=query).execute().get('files', [])
+                if res:
+                    self.drive_service.files().update(fileId=res[0]['id'], media_body=media).execute()
+                else:
+                    meta = {'name': filename, 'parents': [self.folder_id]}
+                    self.drive_service.files().create(body=meta, media_body=media).execute()
+                os.remove("temp.tmp")
+            except:
+                pass
 
     def read_web_csv(self, url):
         if not url or "http" not in url: return None
@@ -200,12 +227,13 @@ class ResourceManager:
             print(f">>> 讀取 Web CSV...")
             df = pd.read_csv(url)
             return df
-        except Exception as e:
-            print(f">>> Web CSV 讀取失敗: {e}")
+        except:
             return None
 
     def send_email_with_chart(self, to, subject, body_html, image_bytes=None):
-        if not self.gmail_service or not to: return
+        if not self.gmail_service or not to:
+            print(">>> [警告] Gmail 服務未啟動或未設定收件人。")
+            return
         try:
             msg = MIMEMultipart('related')
             msg['to'] = to
@@ -223,8 +251,9 @@ class ResourceManager:
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
             self.gmail_service.users().messages().send(userId='me', body={'raw': raw}).execute()
-            print(f">>> [通知] 郵件(含圖表)已發送至: {to}")
-        except Exception as e: print(f">>> [錯誤] 發信失敗: {e}")
+            print(f">>> [通知] 郵件已發送至: {to}")
+        except Exception as e:
+            print(f">>> [錯誤] 發信失敗: {e}")
 
 # ==========================================
 # 2. 智投雙軌系統
@@ -256,8 +285,10 @@ class HybridInvestSystem:
         conf = self.rm.load_local_config() or default_conf
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
-        if "email_config" not in conf: conf["email_config"] = default_conf["email_config"]
-        self.rm.save_file_to_drive("config.json", conf)
+        
+        # 如果是 GitHub Action 環境，不建議反向存回 Drive 免得權限衝突
+        if not os.environ.get('GITHUB_ACTIONS'):
+            self.rm.save_file_to_drive("config.json", conf)
         return conf
 
     def calculate_indicators(self, df):
@@ -389,7 +420,7 @@ class HybridInvestSystem:
                         portfolio[t]["shares"] += sh
                         portfolio[t]["cost"] += base_alloc
                         month_base_done[t] = True
-                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_alloc), "股數": round(sh, 2), "成交價": round(price, 2)})
+                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_alloc), "股數": round(sh, 2)})
 
                 avg = portfolio[t]["cost"] / portfolio[t]["shares"] if portfolio[t]["shares"] > 0 else 0
                 mode = t_conf["mode"]
@@ -404,7 +435,7 @@ class HybridInvestSystem:
                                 portfolio[t]["cost"] += amt
                                 war_chest -= amt
                                 extra_done[t].add(s_name)
-                                history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"金字塔_{s_name}", "金額": int(amt), "股數": round(sh, 2), "成交價": round(price, 2)})
+                                history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"金字塔_{s_name}", "金額": int(amt), "股數": round(sh, 2)})
                                 break
                 elif mode == "TECH":
                     if (row['K'] < 20 or row['WK'] < 20) and "K_OVER" not in extra_done[t]:
@@ -414,7 +445,7 @@ class HybridInvestSystem:
                             portfolio[t]["cost"] += base_alloc
                             war_chest -= base_alloc
                             extra_done[t].add("K_OVER")
-                            history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "K值超賣", "金額": int(base_alloc), "股數": round(sh, 2), "成交價": round(price, 2)})
+                            history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "K值超賣", "金額": int(base_alloc), "股數": round(sh, 2)})
                     for ma in ['MA60', 'MA120']:
                         mv = row[ma]
                         if price >= mv and (price-mv)/mv < 0.02 and (row['Low'] <= mv or df.iloc[idx-1]['Low'] <= mv):
@@ -425,10 +456,9 @@ class HybridInvestSystem:
                                     portfolio[t]["cost"] += base_alloc
                                     war_chest -= base_alloc
                                     extra_done[t].add(ma)
-                                    history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"{ma}有撐", "金額": int(base_alloc), "股數": round(sh, 2), "成交價": round(price, 2)})
+                                    history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": f"{ma}有撐", "金額": int(base_alloc), "股數": round(sh, 2)})
 
         res_df = pd.DataFrame(history)
-        self.rm.save_file_to_drive("Backtest_Result_Generated.csv", res_df)
         return res_df, war_chest
 
     def generate_chart(self, summary_df, cash_tickers):
@@ -464,7 +494,7 @@ class HybridInvestSystem:
             return None
 
     def analyze_and_notify(self, df, mode="REAL", war_chest_sim=0):
-        print(">>> 執行資產分析與策略報告生成...")
+        print(f">>> 執行資產分析與策略報告生成 [{mode}]...")
         df.columns = [c.strip() for c in df.columns]
         
         war_chest_mv = 0
@@ -479,7 +509,6 @@ class HybridInvestSystem:
                 for col in type_cols:
                     is_fixed |= df[col].astype(str).str.contains('定存', na=False)
             
-            # 定存總市值計算 (用於War Chest)
             if price_col:
                 df['RowMV'] = 0.0
                 df.loc[is_fixed, 'RowMV'] = df.loc[is_fixed, '股數'] * df.loc[is_fixed, price_col]
@@ -493,22 +522,17 @@ class HybridInvestSystem:
             war_chest_mv = war_chest_sim
             cash_tickers = {'定存', 'CASH'}
 
-        # 聚合計算 (確保定存標的 RowMV 被正確加總)
         aggs = {"金額": "sum", "股數": "sum"}
         if mode == "REAL" and 'RowMV' in df.columns: aggs["RowMV"] = "sum"
         
         summary = df.groupby("標的").agg(aggs).reset_index()
         summary['MarketValue'] = 0.0
         summary['Price'] = 0.0
-        
         now = datetime.now()
         
-        # 1. 計算所有標的市值 (定存取 RowMV, 股票取 YF)
         for idx, row in summary.iterrows():
             ticker = row['標的']
-            
             if ticker in cash_tickers or ticker.upper() == 'CASH':
-                # 定存類: 市值取 RowMV 總和, 價格反推
                 if mode == "REAL" and 'RowMV' in summary.columns:
                     summary.at[idx, 'MarketValue'] = row['RowMV']
                     summary.at[idx, 'Price'] = (row['RowMV'] / row['股數']) if row['股數'] > 0 else 1.0
@@ -516,7 +540,6 @@ class HybridInvestSystem:
                     summary.at[idx, 'MarketValue'] = war_chest_sim
                     summary.at[idx, 'Price'] = 1.0
             else:
-                # 股票類
                 try:
                     curr_data = yf.download(ticker, period="1d", progress=False)
                     if isinstance(curr_data.columns, pd.MultiIndex):
@@ -531,22 +554,19 @@ class HybridInvestSystem:
         html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>"
         html += '<img src="cid:portfolio_chart" alt="Portfolio Chart" style="max-width:100%;"><br><hr>'
         html += "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%; font-family: Arial;'>"
-        html += "<tr style='background:#f2f2f2;'>"
-        html += "<th>標的</th><th>股數</th><th>市值</th><th>報酬率</th>"
+        html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值</th><th>報酬率</th>"
         if mode == "REAL":
             html += "<th>今日建議</th><th>建議金額</th><th>相當股數</th>"
         html += "</tr>"
 
         print(f"\n{'標的名稱':<12} {'股數':>8} {'市值':>10} {'報酬率':>8} {'今日建議':<10}")
-        
         all_targets = sorted(list(set(list(summary['標的']) + list(self.config["targets"].keys()))))
         
         total_cost = 0
         total_mv = 0
 
         for ticker in all_targets:
-            if ticker == 'CASH': continue # 忽略佔位符
-
+            if ticker == 'CASH': continue
             row = summary[summary['標的'] == ticker]
             if not row.empty:
                 cost = row.iloc[0]['金額']
@@ -559,12 +579,10 @@ class HybridInvestSystem:
             total_cost += cost
             total_mv += mv
             
-            # 判斷是否為定存 (定存不給投資建議)
             is_fd = ticker in cash_tickers
             suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"
             
             if mode == "REAL" and not is_fd:
-                # 只有非定存才跑策略
                 avg_cost = cost / shares if shares > 0 else 0
                 df['日期'] = pd.to_datetime(df['日期'])
                 month_df = df[(df['標的'] == ticker) & (df['日期'].dt.month == now.month) & (df['日期'].dt.year == now.year)]
@@ -586,7 +604,6 @@ class HybridInvestSystem:
                         hist_data = self.calculate_indicators(hist_data)
                         p_status = {"month_base_invested": month_base, "executed_extra": extra_types, "avg_cost": avg_cost}
                         s_text, s_val = self.evaluate_strategy_today(ticker, hist_data, war_chest_mv, p_status)
-                        
                         suggestion = s_text
                         if s_val > 0:
                             sugg_amt_str = f"{s_val:,.0f}"
@@ -594,34 +611,25 @@ class HybridInvestSystem:
                 except: pass
 
             t_name = self.config["targets"].get(ticker, {}).get("name", ticker)
-            
             print(f"{t_name:<12} {shares:>8.0f} {mv:>10,.0f} {roi:>7.2f}% {suggestion:<10}")
             
             roi_color = "red" if roi > 0 else "green"
-            # 填寫 HTML 表格
             html += f"<tr><td>{t_name}</td><td>{shares:,.0f}</td><td>{mv:,.0f}</td><td style='color:{roi_color}'>{roi:+.2f}%</td>"
             if mode == "REAL":
-                # 若為定存，後三欄顯示 "-"
                 if is_fd:
                     html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else:
-                    sugg_color = "red" if sugg_amt_str != "-" else "black"
-                    fw = "bold" if sugg_amt_str != "-" else "normal"
-                    html += f"<td style='color:{sugg_color}; font-weight:{fw};'>{suggestion}</td>"
-                    html += f"<td style='color:{sugg_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
+                    s_color = "red" if sugg_amt_str != "-" else "black"
+                    html += f"<td style='color:{s_color};'>{suggestion}</td><td style='color:{s_color};'>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
 
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
-
         html += "</table>"
         html += f"<br><b>總投入成本:</b> {total_cost:,.0f} TWD<br>"
         html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD<br>"
-        # 加碼金顯示: 實戰用計算出的總市值，回測用模擬值
         wc_display = war_chest_mv if mode == "REAL" else war_chest_sim
-        html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
+        html += f"<b>加碼金餘額:</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
         html += f"<b>整體報酬率:</b> <span style='font-size:18px; color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span><br>"
-        
-        if mode == "BACKTEST": html += f"<small>(註: 定存池剩餘為回測模擬值)</small>"
         
         email_conf = self.config.get("email_config", {})
         if email_conf.get("enable") and email_conf.get("receiver_email"):
@@ -632,10 +640,8 @@ class HybridInvestSystem:
         url = self.config.get("transaction_csv_url", "")
         web_df = self.rm.read_web_csv(url)
         if web_df is not None and not web_df.empty:
-            print(">>> [模式] 實戰資產追蹤 + 即時建議")
             self.analyze_and_notify(web_df, mode="REAL")
         else:
-            print(">>> [模式] 歷史策略回測")
             backtest_df, chest = self.run_backtest()
             self.analyze_and_notify(backtest_df, mode="BACKTEST", war_chest_sim=chest)
 
