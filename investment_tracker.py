@@ -72,7 +72,6 @@ plt.switch_backend('Agg')
 # ==========================================
 # Google API 函式庫導入預檢
 # ==========================================
-# [修復] 預先定義全域變數，防止 NameError
 HAS_GCP_LIBS = False
 
 try:
@@ -110,7 +109,6 @@ if os.path.exists(font_filename):
 # 1. 雲端與通訊資源管理員 (ResourceManager)
 # ==========================================
 class ResourceManager:
-    # [加固] 類別層級定義，確保屬性永遠存在於物件中，防止 AttributeError
     folder_id = None
     drive_service = None
     gmail_service = None
@@ -136,7 +134,6 @@ class ResourceManager:
         else:
             self.base_path = os.getcwd()
             
-        # [修復點] 確保 HAS_GCP_LIBS 已經定義才進入授權流程
         if HAS_GCP_LIBS:
             self._authenticate_services()
         else:
@@ -224,7 +221,7 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
-        # 1. 優先檢查本地檔案 (這對應到從 GitHub Secrets 回復的檔案)
+        # 1. 優先檢查本地檔案
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
             try:
@@ -234,7 +231,7 @@ class ResourceManager:
             except Exception as e:
                 print(f">>> [系統] 本地檔案讀取失敗: {e}")
         
-        # 2. 安全獲取 folder_id，防止 AttributeError
+        # 2. 安全獲取 folder_id
         fid = getattr(self, 'folder_id', None)
         if self.drive_service and fid:
             try:
@@ -261,14 +258,12 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
-        # 始終儲存一份到本地執行環境
         local_path = os.path.join(self.base_path, filename)
         try:
             with open(local_path, 'w', encoding='utf-8') as f:
                 f.write(content)
         except: pass
 
-        # 同步至雲端 (安全檢查)
         fid = getattr(self, 'folder_id', None)
         if self.drive_service and fid:
             try:
@@ -344,7 +339,6 @@ class HybridInvestSystem:
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
         
-        # GitHub 環境下避免執行反向雲端儲存
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -545,7 +539,8 @@ class HybridInvestSystem:
                     if not hist_data.empty:
                         curr_price = float(hist_data['Close'].iloc[-1])
                         hist_data = self.calculate_indicators(hist_data)
-                        sugg_text, sugg_val = self.evaluate_strategy_today(ticker, hist_data, war_chest_mv, {"month_base_invested": 0, "avg_cost": cost/shares if shares>0 else 0})
+                        p_status = {"month_base_invested": 0, "avg_cost": cost/shares if shares>0 else 0}
+                        sugg_text, sugg_val = self.evaluate_strategy_today(ticker, hist_data, war_chest_mv, p_status)
                         suggestion = sugg_text
                         if sugg_val > 0:
                             sugg_amt_str = f"{s_val:,.0f}"
@@ -564,6 +559,17 @@ class HybridInvestSystem:
             self.rm.send_email_with_chart(email_conf["receiver_email"], f"智投報告 - {now.strftime('%Y-%m-%d')}", html, chart_bytes)
 
     def run(self):
+        # [新增] 開市檢查邏輯
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        # 獲取今日是否為 XTAI (台股) 交易日
+        valid_days = self.xtai.valid_days(start_date=today_str, end_date=today_str)
+        
+        if len(valid_days) == 0:
+            print(f">>> [休市通知] 今日 ({today_str}) 為休市日或週末，系統自動跳過執行。")
+            return
+            
+        print(f">>> [開市確認] 今日 ({today_str}) 為交易日，開始執行分析程序...")
+        
         url = self.config.get("transaction_csv_url", "")
         web_df = self.rm.read_web_csv(url)
         if web_df is not None and not web_df.empty:
