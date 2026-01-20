@@ -70,6 +70,43 @@ from email.mime.multipart import MIMEMultipart
 plt.switch_backend('Agg') 
 
 # ==========================================
+# Google API 函式庫導入預檢
+# ==========================================
+# [修復] 預先定義全域變數，防止 NameError
+HAS_GCP_LIBS = False
+
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    HAS_GCP_LIBS = True
+except ImportError:
+    HAS_GCP_LIBS = False
+
+# ==========================================
+# 中文字型自動設定
+# ==========================================
+font_filename = "taipei_sans_tc_beta.ttf"
+if not os.path.exists(font_filename):
+    print(">>> 偵測到缺少中文字型，正在嘗試下載...")
+    url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
+    try:
+        gdown.download(url, font_filename, quiet=True)
+    except:
+        pass
+
+if os.path.exists(font_filename):
+    try:
+        fm.fontManager.addfont(font_filename)
+        font_prop = fm.FontProperties(fname=font_filename)
+        plt.rcParams['font.family'] = font_prop.get_name()
+        plt.rcParams['axes.unicode_minus'] = False
+    except:
+        pass
+
+# ==========================================
 # 1. 雲端與通訊資源管理員 (ResourceManager)
 # ==========================================
 class ResourceManager:
@@ -99,8 +136,11 @@ class ResourceManager:
         else:
             self.base_path = os.getcwd()
             
+        # [修復點] 確保 HAS_GCP_LIBS 已經定義才進入授權流程
         if HAS_GCP_LIBS:
             self._authenticate_services()
+        else:
+            print(">>> [系統] 偵測到 Google API 套件未安裝或導入失敗，將以本地模式執行。")
 
     def _detect_colab(self):
         try:
@@ -184,17 +224,17 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
-        # [修復] 1. 優先檢查本地檔案 (這對應到從 GitHub Secrets 回復的檔案)
+        # 1. 優先檢查本地檔案 (這對應到從 GitHub Secrets 回復的檔案)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
                     print(f">>> [系統] 從本地環境成功載入: {filename}")
-                    return json.load(f) # 直接回傳，不再往下執行雲端查詢邏輯
+                    return json.load(f)
             except Exception as e:
                 print(f">>> [系統] 本地檔案讀取失敗: {e}")
         
-        # [修復] 2. 安全獲取 folder_id，防止 AttributeError
+        # 2. 安全獲取 folder_id，防止 AttributeError
         fid = getattr(self, 'folder_id', None)
         if self.drive_service and fid:
             try:
@@ -414,7 +454,7 @@ class HybridInvestSystem:
                         portfolio[t]["shares"] += sh
                         portfolio[t]["cost"] += base_budget
                         month_base_done[t] = True
-                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_budget), "股數": round(sh, 2)})
+                        history.append({"日期": date.strftime('%Y-%m-%d'), "標的": t, "策略": "基礎投資", "金額": int(base_budget), "股數": round(sh, 2), "成交價": round(price, 2)})
         return pd.DataFrame(history), war_chest
 
     def generate_chart(self, summary_df, cash_tickers):
@@ -426,6 +466,7 @@ class HybridInvestSystem:
             width = 0.35
             axes[0].bar(x - width/2, plot_df['金額'], width, label='投入成本', color='#95a5a6')
             axes[0].bar(x + width/2, plot_df['MarketValue'], width, label='目前市值', color='#e74c3c')
+            
             axes[0].set_ylabel('金額 (TWD)')
             axes[0].set_title('投資組合: 成本 vs 市值')
             axes[0].set_xticks(x)
