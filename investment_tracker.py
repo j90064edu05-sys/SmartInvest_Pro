@@ -9,11 +9,9 @@ from datetime import datetime, timedelta
 # 基礎環境自我診斷
 # ==========================================
 def diagnostic_check():
-    """檢查 Python 路徑是否正常，預防 'Could not find platform independent libraries' 報錯後續影響"""
+    """檢查 Python 路徑是否正常，預防路徑配置問題"""
     print(f">>> [診斷] Python 執行路徑: {sys.executable}")
     print(f">>> [診斷] Python 庫路徑: {sys.prefix}")
-    if not os.path.exists(os.path.join(sys.prefix, "lib")) and os.name != 'nt':
-        print(">>> [警告] 偵測到 Python 庫路徑可能不完整，請檢查 PYTHONHOME 變數。")
 
 diagnostic_check()
 
@@ -23,36 +21,29 @@ diagnostic_check()
 def install_and_import(package, import_name=None):
     """
     自動檢查並安裝缺少的 Python 套件。
-    針對自動化環境（如 GitHub Actions）優化，失敗時將立即終止程式。
     """
     import_name = import_name or package
     try:
         __import__(import_name)
     except ImportError:
         print(f">>> 偵測到缺少套件: {package}，正在嘗試自動安裝...")
-        # 使用 sys.executable 確保安裝在當前執行的 Python 環境中
-        # 增加 --quiet 減少日誌，增加 --no-cache-dir 確保獲取最新版
+        # 確保在目前 Python 環境安裝，並使用雙引號處理路徑空白
         exit_code = os.system(f'"{sys.executable}" -m pip install {package} --no-cache-dir')
         
         if exit_code != 0:
             print(f"\n" + "="*60)
             print(f">>> [嚴重錯誤] 無法自動安裝套件: {package}")
             print(f">>> 結束代碼 (Exit Code): {exit_code}")
-            print(f">>> 建議解決方案: ")
-            print(f"    1. 本地執行: 請確保您的 Python 環境路徑正確，或嘗試重新安裝 Python。")
-            print(f"    2. 環境變數: 請檢查是否設定了衝突的 PYTHONHOME 或 PYTHONPATH。")
-            print(f"    3. 手動安裝: 請在終端機執行 'pip install {package}'")
             print("="*60 + "\n")
-            sys.exit(1) # 強制停止執行
+            sys.exit(1)
             
         try:
             __import__(import_name)
-            print(f">>> {package} 安裝成功並已成功導入。")
         except ImportError:
-            print(f">>> [嚴重錯誤] {package} 安裝完成但仍無法導入，可能是路徑配置問題。")
+            print(f">>> [嚴重錯誤] {package} 安裝後仍無法導入。")
             sys.exit(1)
 
-# 優先確保基礎套件存在，再進行後續導入
+# 確保核心套件存在
 install_and_import('pandas', 'pandas')
 install_and_import('numpy', 'numpy')
 install_and_import('yfinance', 'yfinance')
@@ -79,42 +70,16 @@ from email.mime.multipart import MIMEMultipart
 plt.switch_backend('Agg') 
 
 # ==========================================
-# 中文字型自動設定
-# ==========================================
-font_filename = "taipei_sans_tc_beta.ttf"
-if not os.path.exists(font_filename):
-    print(">>> 偵測到缺少中文字型，正在嘗試下載...")
-    url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
-    try:
-        gdown.download(url, font_filename, quiet=True)
-    except:
-        pass
-
-if os.path.exists(font_filename):
-    try:
-        fm.fontManager.addfont(font_filename)
-        font_prop = fm.FontProperties(fname=font_filename)
-        plt.rcParams['font.family'] = font_prop.get_name()
-        plt.rcParams['axes.unicode_minus'] = False
-    except:
-        pass
-
-try:
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    HAS_GCP_LIBS = True
-except ImportError:
-    HAS_GCP_LIBS = False
-
-# ==========================================
 # 1. 雲端與通訊資源管理員 (ResourceManager)
 # ==========================================
 class ResourceManager:
+    # [加固] 類別層級定義，確保屬性永遠存在於物件中，防止 AttributeError
+    folder_id = None
+    drive_service = None
+    gmail_service = None
+
     def __init__(self, folder_name="SmartInvest_Pro"):
-        # 最優先初始化屬性，絕對防止 AttributeError
+        # 初始化實例屬性
         self.folder_id = None
         self.drive_service = None
         self.gmail_service = None
@@ -169,22 +134,17 @@ class ResourceManager:
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 try:
-                    print(">>> [系統] Token 已過期，嘗試自動刷新...")
                     creds.refresh(Request())
-                except Exception as e:
-                    print(f">>> [警告] 自動刷新失敗: {e}")
+                except:
                     creds = None
             
             if not creds:
                 if self.is_github:
-                    print("="*60)
-                    print(">>> [錯誤] 偵測到 GitHub 環境但 Token 失效。")
-                    print(">>> 請在本地產生新的 token.json 後更新 GitHub Secret。")
-                    print("="*60)
+                    print(">>> [系統] GitHub Actions 模式：Token 失效，跳過雲端授權步驟。")
                     return 
 
                 if not os.path.exists(cred_path):
-                    print(">>> [提示] 缺少憑證檔案，無法使用雲端功能。")
+                    print(">>> [系統] 找不到憑證檔案，使用純本地模式。")
                     return
 
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, self.SCOPES)
@@ -207,7 +167,7 @@ class ResourceManager:
             self.gmail_service = build('gmail', 'v1', credentials=creds)
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> [警告] Google 服務啟動失敗: {e}")
+            print(f">>> [警告] Google 服務初始化受限: {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -224,18 +184,21 @@ class ResourceManager:
             self.folder_id = None
 
     def load_local_config(self, filename="config.json"):
+        # [修復] 1. 優先檢查本地檔案 (這對應到從 GitHub Secrets 回復的檔案)
         local_path = os.path.join(self.base_path, filename)
         if os.path.exists(local_path):
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
-                    print(f">>> [系統] 從本地載入設定: {local_path}")
-                    return json.load(f)
-            except:
-                pass
+                    print(f">>> [系統] 從本地環境成功載入: {filename}")
+                    return json.load(f) # 直接回傳，不再往下執行雲端查詢邏輯
+            except Exception as e:
+                print(f">>> [系統] 本地檔案讀取失敗: {e}")
         
-        if self.drive_service and getattr(self, 'folder_id', None):
+        # [修復] 2. 安全獲取 folder_id，防止 AttributeError
+        fid = getattr(self, 'folder_id', None)
+        if self.drive_service and fid:
             try:
-                query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
+                query = f"name = '{filename}' and '{fid}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
                 if res:
                     request = self.drive_service.files().get_media(fileId=res[0]['id'])
@@ -243,7 +206,7 @@ class ResourceManager:
                     downloader = MediaIoBaseDownload(fh, request)
                     done = False
                     while not done: _, done = downloader.next_chunk()
-                    print(f">>> [雲端] 從 Drive 載入設定: {filename}")
+                    print(f">>> [雲端] 從 Google Drive 載入設定: {filename}")
                     return json.loads(fh.getvalue().decode('utf-8'))
             except:
                 pass
@@ -258,22 +221,25 @@ class ResourceManager:
         else:
             content = json.dumps(data, indent=4, ensure_ascii=False)
 
+        # 始終儲存一份到本地執行環境
         local_path = os.path.join(self.base_path, filename)
         try:
             with open(local_path, 'w', encoding='utf-8') as f:
                 f.write(content)
         except: pass
 
-        if self.drive_service and getattr(self, 'folder_id', None):
+        # 同步至雲端 (安全檢查)
+        fid = getattr(self, 'folder_id', None)
+        if self.drive_service and fid:
             try:
                 with open("temp.tmp", "w", encoding="utf-8") as f: f.write(content)
                 media = MediaFileUpload("temp.tmp", mimetype=mimetype)
-                query = f"name = '{filename}' and '{self.folder_id}' in parents and trashed = false"
+                query = f"name = '{filename}' and '{fid}' in parents and trashed = false"
                 res = self.drive_service.files().list(q=query).execute().get('files', [])
                 if res:
                     self.drive_service.files().update(fileId=res[0]['id'], media_body=media).execute()
                 else:
-                    meta = {'name': filename, 'parents': [self.folder_id]}
+                    meta = {'name': filename, 'parents': [fid]}
                     self.drive_service.files().create(body=meta, media_body=media).execute()
                 os.remove("temp.tmp")
             except: pass
@@ -288,7 +254,7 @@ class ResourceManager:
 
     def send_email_with_chart(self, to, subject, body_html, image_bytes=None):
         if not self.gmail_service or not to:
-            print(">>> [警告] Gmail 授權失效或無收件人，略過寄信。")
+            print(">>> [警告] Gmail 未授權或無收件人，略過寄信。")
             return
         try:
             msg = MIMEMultipart('related')
@@ -337,6 +303,8 @@ class HybridInvestSystem:
         conf = self.rm.load_local_config() or default_conf
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
+        
+        # GitHub 環境下避免執行反向雲端儲存
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
