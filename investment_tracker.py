@@ -111,8 +111,6 @@ class ResourceManager:
             
         if HAS_GCP_LIBS:
             self._authenticate_services()
-        else:
-            print(">>> [系統] 缺少 Google API 套件，僅能本地執行。")
 
     def _detect_colab(self):
         try:
@@ -285,13 +283,12 @@ class HybridInvestSystem:
             "backtest_start_date": "2020-01-01",
             "monthly_budget": 20000,
             "cash_pool_ratio": 0.1,
-            "fee_discount": 1, # [新增] 券商手續費折扣，預設無折扣
+            "fee_discount": 1, # [新增] 券商手續費折扣，預設6折
             "email_config": {"enable": True, "receiver_email": ""},
             "targets": {
-                "009808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
+                "00808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
                 "00895.TW": {"ratio": 0.3, "mode": "PYRAMID", "name": "富邦智慧車"},
-                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"},
-                "2002.TW": {"ratio": 0.0, "mode": "ACTIVE", "name": "中鋼"}
+                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"}
             },
             "pyramid_levels": {
                 "S1": {"drop": -0.15, "mult": 1.0}, "S2": {"drop": -0.25, "mult": 1.5}, "S3": {"drop": -0.35, "mult": 2.0}
@@ -438,14 +435,10 @@ class HybridInvestSystem:
         start_date = self.config["backtest_start_date"]
         tickers = list(self.config["targets"].keys())
         data_map = {}
-        warmup_date = (pd.to_datetime(start_date) - timedelta(days=365*3)).strftime('%Y-%m-%d')
-        
         for t in tickers:
-            raw = yf.download(t, start=warmup_date, progress=False)
+            raw = yf.download(t, period="max", progress=False)
             if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.get_level_values(0)
-            full_df = self.calculate_indicators(raw)
-            data_map[t] = full_df.loc[start_date:]
-
+            data_map[t] = self.calculate_indicators(raw).loc[start_date:]
         history = []
         portfolio = {t: {"shares": 0, "cost": 0} for t in tickers}
         war_chest = 0
@@ -454,14 +447,12 @@ class HybridInvestSystem:
         current_month = -1
         month_base_done = {t: False for t in tickers}
         extra_done = {t: set() for t in tickers}
-
         for date in all_dates:
             if date.month != current_month:
                 current_month = date.month
                 war_chest += budget * self.config["cash_pool_ratio"]
                 month_base_done = {t: False for t in tickers}
                 extra_done = {t: set() for t in tickers}
-
             for t in tickers:
                 df = data_map[t]
                 if date not in df.index: continue
@@ -469,7 +460,6 @@ class HybridInvestSystem:
                 prev_price = df.iloc[df.index.get_loc(date)-1]['Close']
                 t_conf = self.config["targets"][t]
                 base_budget = budget * t_conf["ratio"]
-
                 if not month_base_done[t]:
                     is_last = (date.month != (date + timedelta(days=5)).month)
                     idx = df.index.get_loc(date)
@@ -551,23 +541,28 @@ class HybridInvestSystem:
             conf_html += f"&nbsp;&nbsp;- {t}: {c['ratio']*100:.0f}% ({c['mode']})<br>"
         conf_html += "</div>"
 
-        # 預計算市值
         for idx, row in summary.iterrows():
             ticker = row['標的']
             if ticker in cash_tickers or ticker.upper() == 'CASH':
-                summary.at[idx, 'MarketValue'] = row['RowMV'] if 'RowMV' in summary.columns else war_chest_sim
+                if mode == "REAL" and 'RowMV' in summary.columns:
+                    summary.at[idx, 'MarketValue'] = row['RowMV']
+                else:
+                    summary.at[idx, 'MarketValue'] = war_chest_sim
+                summary.at[idx, 'Price'] = 1.0
             else:
                 try:
                     curr_data = yf.download(ticker, period="max", progress=False)
-                    if isinstance(curr_data.columns, pd.MultiIndex): curr_data.columns = curr_data.columns.get_level_values(0)
+                    if isinstance(curr_data.columns, pd.MultiIndex):
+                        curr_data.columns = curr_data.columns.get_level_values(0)
                     price = float(curr_data['Close'].iloc[-1]) if not curr_data.empty else 0
                 except: price = 0
+                summary.at[idx, 'Price'] = price
                 summary.at[idx, 'MarketValue'] = row['股數'] * price
-        
+
         chart_bytes = self.generate_chart(summary, cash_tickers)
+
         html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>{conf_html}"
         html += '<img src="cid:portfolio_chart" alt="Portfolio Chart" style="max-width:100%;"><br><hr>'
-        # [修改] 增加淨利與淨ROI欄位
         html += "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%; font-family: Arial; font-size: 13px;'>"
         html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值</th><th>帳面報酬</th><th>淨利(預估)</th><th>淨報酬%</th>"
         if mode == "REAL": html += "<th>今日建議</th><th>金額</th><th>股數</th>"
@@ -590,24 +585,20 @@ class HybridInvestSystem:
             is_fd = ticker in cash_tickers
             suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"
             
-            # [新增] 淨損益計算
+            # 淨損益計算
             tax_rate = 0.0
             if is_fd:
                 tax_rate = 0.0
             elif str(ticker).startswith("00") or "ETF" in str(ticker):
-                # 台灣債券ETF免稅，但這裡從簡，僅區分ETF與個股
-                if "債" in str(ticker) or "B" in str(ticker): # 簡易判斷債券
+                if "債" in str(ticker) or "B" in str(ticker):
                     tax_rate = 0.0
                 else:
                     tax_rate = 0.001
             else:
                 tax_rate = 0.003
             
-            # 手續費 (定存無手續費)
             handling_fee = 0 if is_fd else (mv * 0.001425 * fee_discount)
-            # 交易稅
             trans_tax = mv * tax_rate
-            
             net_profit = (mv - cost) - handling_fee - trans_tax
             net_roi = (net_profit / cost * 100) if cost > 0 else 0
 
@@ -657,32 +648,30 @@ class HybridInvestSystem:
                 else: html += f"<td>{suggestion}</td><td>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
         
-        cash_cost_total = 0
-        if mode == "REAL":
-            type_cols = [c for c in ['策略', '類別', '類型'] if c in df.columns]
-            is_fixed_agg = pd.Series(False, index=df.index)
-            for col in type_cols: is_fixed_agg |= df[col].astype(str).str.contains('定存', na=False)
-            cash_cost_total = df.loc[is_fixed_agg, '金額'].sum()
-        else: cash_cost_total = war_chest_sim
+        # [修正] 僅在回測模式需手動加回現金
+        if mode == "BACKTEST":
+            total_mv += war_chest_sim
+            total_cost += war_chest_sim
 
-        total_mv += war_chest_mv
-        total_cost += cash_cost_total
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
         
         html += f"</table><br><b>總投入成本:</b> {total_cost:,.0f} TWD<br>"
         html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD (帳面報酬: <span style='color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span>)<br>"
-        html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{war_chest_mv:,.0f} TWD</span>"
+        wc_display = war_chest_mv if mode == "REAL" else war_chest_sim
+        html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
         
         email_conf = self.config.get("email_config", {})
         if email_conf.get("enable") and email_conf.get("receiver_email"):
             self.rm.send_email_with_chart(email_conf["receiver_email"], f"智投報告 - {now.strftime('%Y-%m-%d')}", html, chart_bytes)
 
     def run(self):
+        # 開市檢查
         today_str = datetime.now().strftime('%Y-%m-%d')
         valid_days = self.xtai.valid_days(start_date=today_str, end_date=today_str)
         if len(valid_days) == 0:
             print(f">>> [休市通知] 今日 {today_str} 休市，自動跳過。")
             return
+            
         url = self.config.get("transaction_csv_url", "")
         web_df = self.rm.read_web_csv(url)
         if web_df is not None and not web_df.empty:
