@@ -123,8 +123,13 @@ class ResourceManager:
         if not os.path.exists('/content/drive'):
             drive.mount('/content/drive', force_remount=True)
         self.base_path = f'/content/drive/MyDrive/{self.folder_name}/'
+        # 確保路徑存在，若無則建立
         if not os.path.exists(self.base_path):
-            os.makedirs(self.base_path)
+            try:
+                os.makedirs(self.base_path)
+                print(f">>> [系統] 已建立工作資料夾: {self.base_path}")
+            except OSError as e:
+                print(f">>> [警告] 無法建立資料夾: {e}")
 
     def _authenticate_services(self):
         creds = None
@@ -171,7 +176,7 @@ class ResourceManager:
             self.gmail_service = build('gmail', 'v1', credentials=creds)
             self._ensure_folder_exists()
         except Exception as e:
-            print(f">>> [警告] 服務初始化失敗: {e}")
+            print(f">>> [警告] Google 服務初始化受限: {e}")
 
     def _ensure_folder_exists(self):
         if not self.drive_service: return
@@ -188,13 +193,20 @@ class ResourceManager:
 
     def load_local_config(self, filename="config.json"):
         local_path = os.path.join(self.base_path, filename)
+        
+        # 1. 嘗試讀取本地 (Colab 掛載路徑)
         if os.path.exists(local_path):
             try:
                 with open(local_path, 'r', encoding='utf-8') as f:
-                    print(f">>> [系統] 從本地環境載入設定: {filename}")
+                    print(f">>> [系統] 從本地環境載入設定: {local_path}")
                     return json.load(f)
-            except: pass
-        
+            except Exception as e:
+                # [修正] 印出錯誤而非靜默失敗，方便除錯 (例如 JSON 格式錯誤)
+                print(f">>> [錯誤] 讀取設定檔失敗 ({local_path}): {e}")
+        else:
+            print(f">>> [提示] 找不到設定檔: {local_path}，將嘗試從雲端API讀取或建立預設檔。")
+
+        # 2. 嘗試透過 API 讀取 (備援)
         fid = getattr(self, 'folder_id', None)
         if self.drive_service and fid:
             try:
@@ -206,9 +218,11 @@ class ResourceManager:
                     downloader = MediaIoBaseDownload(fh, request)
                     done = False
                     while not done: _, done = downloader.next_chunk()
-                    print(f">>> [雲端] 從 Drive 載入設定: {filename}")
+                    print(f">>> [雲端] 從 Drive API 載入設定: {filename}")
                     return json.loads(fh.getvalue().decode('utf-8'))
-            except: pass
+            except Exception as e:
+                print(f">>> [警告] API 讀取設定檔失敗: {e}")
+                
         return None
 
     def save_file_to_drive(self, filename, data):
@@ -283,12 +297,13 @@ class HybridInvestSystem:
             "backtest_start_date": "2020-01-01",
             "monthly_budget": 20000,
             "cash_pool_ratio": 0.1,
-            "fee_discount": 1, # [新增] 券商手續費折扣，預設6折
+            "fee_discount": 1, 
             "email_config": {"enable": True, "receiver_email": ""},
             "targets": {
-                "00808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
+                "009808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
                 "00895.TW": {"ratio": 0.3, "mode": "PYRAMID", "name": "富邦智慧車"},
-                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"}
+                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"},
+                "2002.TW": {"ratio": 0.0, "mode": "ACTIVE", "name": "中鋼"}
             },
             "pyramid_levels": {
                 "S1": {"drop": -0.15, "mult": 1.0}, "S2": {"drop": -0.25, "mult": 1.5}, "S3": {"drop": -0.35, "mult": 2.0}
@@ -507,72 +522,48 @@ class HybridInvestSystem:
         df.columns = [c.strip() for c in df.columns]
         war_chest_mv = 0
         cash_tickers = set()
-
         if mode == "REAL":
             type_cols = [c for c in ['策略', '類別', '類型'] if c in df.columns]
             price_col = next((c for c in ['價格', '成交價', 'Price'] if c in df.columns), None)
             is_fixed = pd.Series(False, index=df.index)
             if type_cols:
-                for col in type_cols:
-                    is_fixed |= df[col].astype(str).str.contains('定存', na=False)
-            
+                for col in type_cols: is_fixed |= df[col].astype(str).str.contains('定存', na=False)
             if price_col:
                 df['RowMV'] = 0.0
                 df.loc[is_fixed, 'RowMV'] = df.loc[is_fixed, '股數'] * df.loc[is_fixed, price_col]
                 war_chest_mv = df.loc[is_fixed, 'RowMV'].sum()
-            else:
-                war_chest_mv = df.loc[is_fixed, '金額'].sum()
-            
+            else: war_chest_mv = df.loc[is_fixed, '金額'].sum()
             cash_tickers = set(df[is_fixed]['標的'].unique())
             cash_tickers.add('定存'); cash_tickers.add('CASH')
         else:
             war_chest_mv = war_chest_sim
             cash_tickers = {'定存', 'CASH'}
-
         aggs = {"金額": "sum", "股數": "sum"}
         if mode == "REAL" and 'RowMV' in df.columns: aggs["RowMV"] = "sum"
         summary = df.groupby("標的").agg(aggs).reset_index()
         summary['MarketValue'] = 0.0
         now = datetime.now()
-        
-        conf_html = f"""<div style='background-color:#f9f9f9; padding:10px; margin-bottom:15px; border-radius:5px; font-size:13px; color:#555;'>
-            <b>📊 系統參數：</b><br>• 每月預算: {self.config['monthly_budget']:,.0f}<br>• 策略配置:<br>"""
-        for t, c in self.config["targets"].items():
-            conf_html += f"&nbsp;&nbsp;- {t}: {c['ratio']*100:.0f}% ({c['mode']})<br>"
-        conf_html += "</div>"
-
         for idx, row in summary.iterrows():
             ticker = row['標的']
             if ticker in cash_tickers or ticker.upper() == 'CASH':
-                if mode == "REAL" and 'RowMV' in summary.columns:
-                    summary.at[idx, 'MarketValue'] = row['RowMV']
-                else:
-                    summary.at[idx, 'MarketValue'] = war_chest_sim
-                summary.at[idx, 'Price'] = 1.0
+                summary.at[idx, 'MarketValue'] = row['RowMV'] if 'RowMV' in summary.columns else war_chest_sim
             else:
                 try:
                     curr_data = yf.download(ticker, period="max", progress=False)
-                    if isinstance(curr_data.columns, pd.MultiIndex):
-                        curr_data.columns = curr_data.columns.get_level_values(0)
+                    if isinstance(curr_data.columns, pd.MultiIndex): curr_data.columns = curr_data.columns.get_level_values(0)
                     price = float(curr_data['Close'].iloc[-1]) if not curr_data.empty else 0
                 except: price = 0
-                summary.at[idx, 'Price'] = price
                 summary.at[idx, 'MarketValue'] = row['股數'] * price
-
         chart_bytes = self.generate_chart(summary, cash_tickers)
-
-        html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>{conf_html}"
+        html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>"
         html += '<img src="cid:portfolio_chart" alt="Portfolio Chart" style="max-width:100%;"><br><hr>'
         html += "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%; font-family: Arial; font-size: 13px;'>"
         html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值</th><th>帳面報酬</th><th>淨利(預估)</th><th>淨報酬%</th>"
         if mode == "REAL": html += "<th>今日建議</th><th>金額</th><th>股數</th>"
         html += "</tr>"
-
         all_targets = sorted(list(set(list(summary['標的']) + list(self.config["targets"].keys()))))
         total_cost = 0; total_mv = 0
-        
-        fee_discount = self.config.get("fee_discount", 1.0) # 讀取折扣
-
+        fee_discount = self.config.get("fee_discount", 1.0)
         for ticker in all_targets:
             if ticker == 'CASH': continue
             row = summary[summary['標的'] == ticker]
@@ -581,28 +572,18 @@ class HybridInvestSystem:
             mv = row.iloc[0]['MarketValue'] if not row.empty else 0
             roi = (mv - cost) / cost * 100 if cost > 0 else 0
             total_cost += cost; total_mv += mv
-            
             is_fd = ticker in cash_tickers
             suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"
-            
-            # 淨損益計算
             tax_rate = 0.0
-            if is_fd:
-                tax_rate = 0.0
+            if is_fd: tax_rate = 0.0
             elif str(ticker).startswith("00") or "ETF" in str(ticker):
-                if "債" in str(ticker) or "B" in str(ticker):
-                    tax_rate = 0.0
-                else:
-                    tax_rate = 0.001
-            else:
-                tax_rate = 0.003
-            
+                if "債" in str(ticker) or "B" in str(ticker): tax_rate = 0.0
+                else: tax_rate = 0.001
+            else: tax_rate = 0.003
             handling_fee = 0 if is_fd else (mv * 0.001425 * fee_discount)
             trans_tax = mv * tax_rate
             net_profit = (mv - cost) - handling_fee - trans_tax
             net_roi = (net_profit / cost * 100) if cost > 0 else 0
-
-            # 策略部分
             if mode == "REAL" and not is_fd:
                 try:
                     hist_data = yf.download(ticker, period="max", progress=False)
@@ -611,9 +592,6 @@ class HybridInvestSystem:
                         curr_price = float(hist_data['Close'].iloc[-1])
                         hist_data = self.calculate_indicators(hist_data)
                         last = hist_data.iloc[-1]
-                        
-                        dif_val = last['DIF']; osc_val = last['OSC']
-                        
                         col_type = next((c for c in ['策略', '類別', '類型'] if c in df.columns), None)
                         month_base = 0; extra_types = []
                         if col_type:
@@ -625,53 +603,46 @@ class HybridInvestSystem:
                                  if "金字塔" in t_str: extra_types.append(t_str.split('_')[-1])
                                  if "技術" in t_str or "K值" in t_str: extra_types.append("K_OVER" if "K值" in t_str else t_str)
                                  if "加碼" in t_str and "MA" in t_str: extra_types.append(t_str) 
-
                         sugg_text, sugg_val = self.evaluate_strategy_today(ticker, hist_data, war_chest_mv, {"month_base_invested": month_base, "executed_extra": extra_types, "avg_cost": cost/shares if shares>0 else 0})
                         suggestion = sugg_text
                         if sugg_val > 0:
                             sugg_amt_str = f"{sugg_val:,.0f}"
                             sugg_shares_str = f"{int(sugg_val / curr_price)}"
-                        
-                        # Console Output
-                        print(f"{ticker:<10} {shares:>8.0f} {mv:>10,.0f} {roi:>7.2f}% (淨{net_roi:.2f}%) DIF:{dif_val:.4f} OSC:{osc_val:.4f} {suggestion:<10}")
-
+                        print(f"[{ticker}] 股數:{shares:,.0f} 市價:{curr_price:.2f} 市值:{mv:,.0f}")
+                        print(f"       OSC:{last['OSC']:.4f} DIF:{last['DIF']:.4f} MACD:{last['DEA']:.4f}")
+                        print(f"       K:{last['K']:.2f} D:{last['D']:.2f} MA60:{last['MA60']:.2f} MA120:{last['MA120']:.2f}")
+                        print(f"       建議: {suggestion}")
+                        print("-" * 60)
                 except: pass
-            
+            elif is_fd:
+                print(f"[{ticker}] (定存) 股數:{shares:,.0f} 市價:{mv/shares if shares>0 else 1:.2f} 市值:{mv:,.0f} 報酬:{roi:.2f}%")
+                print("-" * 60)
             roi_color = "red" if roi > 0 else "green"
             net_color = "red" if net_roi > 0 else "green"
-            
             html += f"<tr><td>{ticker}</td><td>{shares:,.0f}</td><td>{mv:,.0f}</td><td style='color:{roi_color}'>{roi:+.2f}%</td>"
             html += f"<td style='color:{net_color}'>{net_profit:,.0f}</td><td style='color:{net_color}'>{net_roi:+.2f}%</td>"
-            
             if mode == "REAL":
                 if is_fd: html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else: html += f"<td>{suggestion}</td><td>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
-        
-        # [修正] 僅在回測模式需手動加回現金
         if mode == "BACKTEST":
             total_mv += war_chest_sim
             total_cost += war_chest_sim
-
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
-        
         html += f"</table><br><b>總投入成本:</b> {total_cost:,.0f} TWD<br>"
         html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD (帳面報酬: <span style='color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span>)<br>"
         wc_display = war_chest_mv if mode == "REAL" else war_chest_sim
         html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
-        
         email_conf = self.config.get("email_config", {})
         if email_conf.get("enable") and email_conf.get("receiver_email"):
             self.rm.send_email_with_chart(email_conf["receiver_email"], f"智投報告 - {now.strftime('%Y-%m-%d')}", html, chart_bytes)
 
     def run(self):
-        # 開市檢查
         today_str = datetime.now().strftime('%Y-%m-%d')
         valid_days = self.xtai.valid_days(start_date=today_str, end_date=today_str)
         if len(valid_days) == 0:
             print(f">>> [休市通知] 今日 {today_str} 休市，自動跳過。")
             return
-            
         url = self.config.get("transaction_csv_url", "")
         web_df = self.rm.read_web_csv(url)
         if web_df is not None and not web_df.empty:
