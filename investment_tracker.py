@@ -11,16 +11,6 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# 基礎環境自我診斷
-# ==========================================
-def diagnostic_check():
-    """檢查 Python 路徑是否正常"""
-    print(f">>> [診斷] Python 執行路徑: {sys.executable}")
-    print(f">>> [診斷] Python 庫路徑: {sys.prefix}")
-
-diagnostic_check()
-
-# ==========================================
 # 自動化套件安裝
 # ==========================================
 def install_and_import(package, import_name=None):
@@ -295,11 +285,13 @@ class HybridInvestSystem:
             "backtest_start_date": "2020-01-01",
             "monthly_budget": 20000,
             "cash_pool_ratio": 0.1,
+            "fee_discount": 1, # [新增] 券商手續費折扣，預設無折扣
             "email_config": {"enable": True, "receiver_email": ""},
             "targets": {
-                "00808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
+                "009808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
                 "00895.TW": {"ratio": 0.3, "mode": "PYRAMID", "name": "富邦智慧車"},
-                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"}
+                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"},
+                "2002.TW": {"ratio": 0.0, "mode": "ACTIVE", "name": "中鋼"}
             },
             "pyramid_levels": {
                 "S1": {"drop": -0.15, "mult": 1.0}, "S2": {"drop": -0.25, "mult": 1.5}, "S3": {"drop": -0.35, "mult": 2.0}
@@ -308,6 +300,9 @@ class HybridInvestSystem:
         conf = self.rm.load_local_config() or default_conf
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
+        # 確保有 fee_discount
+        if "fee_discount" not in conf: conf["fee_discount"] = 1
+        
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -327,7 +322,6 @@ class HybridInvestSystem:
         df = df.sort_index()
         price = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
         
-        # MACD
         ema12 = self.calculate_ema_talib(price, 12)
         ema26 = self.calculate_ema_talib(price, 26)
         df['DIF'] = ema12 - ema26
@@ -335,14 +329,12 @@ class HybridInvestSystem:
         df['DEA'] = df['DEA'].reindex(df.index)
         df['OSC'] = df['DIF'] - df['DEA']
         
-        # KD (新增 D 值)
         low9 = df['Low'].rolling(window=9).min()
         high9 = df['High'].rolling(window=9).max()
         rsv = (price - low9) / (high9 - low9) * 100
         df['K'] = rsv.ewm(com=2, adjust=False).mean()
-        df['D'] = df['K'].ewm(com=2, adjust=False).mean() # 新增 D 值
+        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
         
-        # 週K
         df_w = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last'})
         w_low = df_w['Low'].rolling(window=9).min()
         w_high = df_w['High'].rolling(window=9).max()
@@ -350,7 +342,6 @@ class HybridInvestSystem:
         df_w['WK'] = w_rsv.ewm(com=2, adjust=False).mean()
         df = df.join(df_w[['WK']], how='left').ffill()
         
-        # 均線
         for m in [20, 60, 120]: df[f'MA{m}'] = price.rolling(window=m).mean()
         return df
 
@@ -363,6 +354,7 @@ class HybridInvestSystem:
         last = df.iloc[-1]
         prev = df.iloc[-2]
         idx = df.index.get_loc(today)
+        
         suggestion = "觀望"
         invest_amt = 0
         
@@ -372,6 +364,7 @@ class HybridInvestSystem:
         if remaining_base > 100:
             sched = self.xtai.schedule(start_date=today, end_date=today + timedelta(days=10))
             is_last_day = (sched.index[0].month != sched.index[1].month) if len(sched) > 1 else True
+            
             has_dc = False
             for lb in range(1, 4):
                 if idx-lb<0: continue
@@ -445,10 +438,14 @@ class HybridInvestSystem:
         start_date = self.config["backtest_start_date"]
         tickers = list(self.config["targets"].keys())
         data_map = {}
+        warmup_date = (pd.to_datetime(start_date) - timedelta(days=365*3)).strftime('%Y-%m-%d')
+        
         for t in tickers:
-            raw = yf.download(t, period="max", progress=False)
+            raw = yf.download(t, start=warmup_date, progress=False)
             if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.get_level_values(0)
-            data_map[t] = self.calculate_indicators(raw).loc[start_date:]
+            full_df = self.calculate_indicators(raw)
+            data_map[t] = full_df.loc[start_date:]
+
         history = []
         portfolio = {t: {"shares": 0, "cost": 0} for t in tickers}
         war_chest = 0
@@ -457,12 +454,14 @@ class HybridInvestSystem:
         current_month = -1
         month_base_done = {t: False for t in tickers}
         extra_done = {t: set() for t in tickers}
+
         for date in all_dates:
             if date.month != current_month:
                 current_month = date.month
                 war_chest += budget * self.config["cash_pool_ratio"]
                 month_base_done = {t: False for t in tickers}
                 extra_done = {t: set() for t in tickers}
+
             for t in tickers:
                 df = data_map[t]
                 if date not in df.index: continue
@@ -470,6 +469,7 @@ class HybridInvestSystem:
                 prev_price = df.iloc[df.index.get_loc(date)-1]['Close']
                 t_conf = self.config["targets"][t]
                 base_budget = budget * t_conf["ratio"]
+
                 if not month_base_done[t]:
                     is_last = (date.month != (date + timedelta(days=5)).month)
                     idx = df.index.get_loc(date)
@@ -513,9 +513,7 @@ class HybridInvestSystem:
         except: return None
 
     def analyze_and_notify(self, df, mode="REAL", war_chest_sim=0):
-        print(f"\n>>> 智投系統 | 即時監控儀表板 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
-        print("="*80)
-        
+        print(f">>> 執行分析報告 [{mode}]...")
         df.columns = [c.strip() for c in df.columns]
         war_chest_mv = 0
         cash_tickers = set()
@@ -525,7 +523,8 @@ class HybridInvestSystem:
             price_col = next((c for c in ['價格', '成交價', 'Price'] if c in df.columns), None)
             is_fixed = pd.Series(False, index=df.index)
             if type_cols:
-                for col in type_cols: is_fixed |= df[col].astype(str).str.contains('定存', na=False)
+                for col in type_cols:
+                    is_fixed |= df[col].astype(str).str.contains('定存', na=False)
             
             if price_col:
                 df['RowMV'] = 0.0
@@ -544,7 +543,6 @@ class HybridInvestSystem:
         if mode == "REAL" and 'RowMV' in df.columns: aggs["RowMV"] = "sum"
         summary = df.groupby("標的").agg(aggs).reset_index()
         summary['MarketValue'] = 0.0
-        summary['Price'] = 0.0
         now = datetime.now()
         
         conf_html = f"""<div style='background-color:#f9f9f9; padding:10px; margin-bottom:15px; border-radius:5px; font-size:13px; color:#555;'>
@@ -553,63 +551,78 @@ class HybridInvestSystem:
             conf_html += f"&nbsp;&nbsp;- {t}: {c['ratio']*100:.0f}% ({c['mode']})<br>"
         conf_html += "</div>"
 
-        # Email HTML Header
+        # 預計算市值
+        for idx, row in summary.iterrows():
+            ticker = row['標的']
+            if ticker in cash_tickers or ticker.upper() == 'CASH':
+                summary.at[idx, 'MarketValue'] = row['RowMV'] if 'RowMV' in summary.columns else war_chest_sim
+            else:
+                try:
+                    curr_data = yf.download(ticker, period="max", progress=False)
+                    if isinstance(curr_data.columns, pd.MultiIndex): curr_data.columns = curr_data.columns.get_level_values(0)
+                    price = float(curr_data['Close'].iloc[-1]) if not curr_data.empty else 0
+                except: price = 0
+                summary.at[idx, 'MarketValue'] = row['股數'] * price
+        
+        chart_bytes = self.generate_chart(summary, cash_tickers)
         html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>{conf_html}"
         html += '<img src="cid:portfolio_chart" alt="Portfolio Chart" style="max-width:100%;"><br><hr>'
+        # [修改] 增加淨利與淨ROI欄位
         html += "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%; font-family: Arial; font-size: 13px;'>"
-        html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值</th><th>報酬率</th>"
+        html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值</th><th>帳面報酬</th><th>淨利(預估)</th><th>淨報酬%</th>"
         if mode == "REAL": html += "<th>今日建議</th><th>金額</th><th>股數</th>"
         html += "</tr>"
 
-        # 處理資料
         all_targets = sorted(list(set(list(summary['標的']) + list(self.config["targets"].keys()))))
         total_cost = 0; total_mv = 0
+        
+        fee_discount = self.config.get("fee_discount", 1.0) # 讀取折扣
 
         for ticker in all_targets:
-            # 排除純文字佔位符
             if ticker == 'CASH': continue
-
             row = summary[summary['標的'] == ticker]
             cost = row.iloc[0]['金額'] if not row.empty else 0
             shares = row.iloc[0]['股數'] if not row.empty else 0
             mv = row.iloc[0]['MarketValue'] if not row.empty else 0
+            roi = (mv - cost) / cost * 100 if cost > 0 else 0
+            total_cost += cost; total_mv += mv
             
-            # 定存與個股的差異處理
-            is_fd = ticker in cash_tickers or ticker == '定存'
+            is_fd = ticker in cash_tickers
+            suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"
             
-            # 定存邏輯
+            # [新增] 淨損益計算
+            tax_rate = 0.0
             if is_fd:
-                if mode == "REAL" and 'RowMV' in summary.columns:
-                    mv = row['RowMV'].iloc[0] if not row.empty else 0
+                tax_rate = 0.0
+            elif str(ticker).startswith("00") or "ETF" in str(ticker):
+                # 台灣債券ETF免稅，但這裡從簡，僅區分ETF與個股
+                if "債" in str(ticker) or "B" in str(ticker): # 簡易判斷債券
+                    tax_rate = 0.0
                 else:
-                    mv = war_chest_sim
-                curr_price = (mv / shares) if shares > 0 else 1.0
+                    tax_rate = 0.001
             else:
-                # 個股邏輯
+                tax_rate = 0.003
+            
+            # 手續費 (定存無手續費)
+            handling_fee = 0 if is_fd else (mv * 0.001425 * fee_discount)
+            # 交易稅
+            trans_tax = mv * tax_rate
+            
+            net_profit = (mv - cost) - handling_fee - trans_tax
+            net_roi = (net_profit / cost * 100) if cost > 0 else 0
+
+            # 策略部分
+            if mode == "REAL" and not is_fd:
                 try:
                     hist_data = yf.download(ticker, period="max", progress=False)
                     if isinstance(hist_data.columns, pd.MultiIndex): hist_data.columns = hist_data.columns.get_level_values(0)
                     if not hist_data.empty:
                         curr_price = float(hist_data['Close'].iloc[-1])
-                        mv = shares * curr_price
-                        # 儲存以便繪圖
-                        if not row.empty: summary.at[row.index[0], 'MarketValue'] = mv
-                except: curr_price = 0
-
-            roi = (mv - cost) / cost * 100 if cost > 0 else 0
-            total_cost += cost
-            total_mv += mv
-
-            # --- 終端機與 Email 內容生成 ---
-            suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"
-            
-            # 僅非定存進行策略運算
-            if mode == "REAL" and not is_fd:
-                try:
-                    if not hist_data.empty:
                         hist_data = self.calculate_indicators(hist_data)
                         last = hist_data.iloc[-1]
-
+                        
+                        dif_val = last['DIF']; osc_val = last['OSC']
+                        
                         col_type = next((c for c in ['策略', '類別', '類型'] if c in df.columns), None)
                         month_base = 0; extra_types = []
                         if col_type:
@@ -628,42 +641,37 @@ class HybridInvestSystem:
                             sugg_amt_str = f"{sugg_val:,.0f}"
                             sugg_shares_str = f"{int(sugg_val / curr_price)}"
                         
-                        # [終端機] 顯示詳細技術指標
-                        print(f"[{ticker}] 股數:{shares:,.0f} 市價:{curr_price:.2f} 市值:{mv:,.0f}")
-                        print(f"       OSC:{last['OSC']:.4f} DIF:{last['DIF']:.4f} MACD:{last['DEA']:.4f}")
-                        print(f"       K:{last['K']:.2f} D:{last['D']:.2f} MA60:{last['MA60']:.2f} MA120:{last['MA120']:.2f}")
-                        print(f"       建議: {suggestion}")
-                        print("-" * 60)
-                        
+                        # Console Output
+                        print(f"{ticker:<10} {shares:>8.0f} {mv:>10,.0f} {roi:>7.2f}% (淨{net_roi:.2f}%) DIF:{dif_val:.4f} OSC:{osc_val:.4f} {suggestion:<10}")
+
                 except: pass
             
-            # [終端機] 定存僅顯示資產
-            elif is_fd:
-                print(f"[{ticker}] (定存) 股數:{shares:,.0f} 市價:{curr_price:.2f} 市值:{mv:,.0f} 報酬:{roi:.2f}%")
-                print("-" * 60)
-
-            # [Email] 表格行 (不含技術指標)
             roi_color = "red" if roi > 0 else "green"
+            net_color = "red" if net_roi > 0 else "green"
+            
             html += f"<tr><td>{ticker}</td><td>{shares:,.0f}</td><td>{mv:,.0f}</td><td style='color:{roi_color}'>{roi:+.2f}%</td>"
+            html += f"<td style='color:{net_color}'>{net_profit:,.0f}</td><td style='color:{net_color}'>{net_roi:+.2f}%</td>"
+            
             if mode == "REAL":
                 if is_fd: html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else: html += f"<td>{suggestion}</td><td>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
         
-        # 加回定存成本 (如果沒有被包含在 all_targets)
-        # 邏輯: all_targets 包含所有標的(含定存)，所以 total_cost 已經累加正確
-        # total_mv 也已經累加正確
-        
-        chart_bytes = self.generate_chart(summary, cash_tickers)
-        
-        wc_display = war_chest_mv if mode == "REAL" else war_chest_sim
+        cash_cost_total = 0
+        if mode == "REAL":
+            type_cols = [c for c in ['策略', '類別', '類型'] if c in df.columns]
+            is_fixed_agg = pd.Series(False, index=df.index)
+            for col in type_cols: is_fixed_agg |= df[col].astype(str).str.contains('定存', na=False)
+            cash_cost_total = df.loc[is_fixed_agg, '金額'].sum()
+        else: cash_cost_total = war_chest_sim
+
+        total_mv += war_chest_mv
+        total_cost += cash_cost_total
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
         
         html += f"</table><br><b>總投入成本:</b> {total_cost:,.0f} TWD<br>"
-        html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD (報酬: <span style='color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span>)<br>"
-        html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
-        
-        if mode == "BACKTEST": html += f"<small>(註: 定存池剩餘為回測模擬值)</small>"
+        html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD (帳面報酬: <span style='color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span>)<br>"
+        html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{war_chest_mv:,.0f} TWD</span>"
         
         email_conf = self.config.get("email_config", {})
         if email_conf.get("enable") and email_conf.get("receiver_email"):
