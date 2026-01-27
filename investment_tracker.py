@@ -6,6 +6,11 @@ import base64
 import time
 from datetime import datetime, timedelta
 
+# Email 相關模組
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+
 # ==========================================
 # 基礎環境自我診斷
 # ==========================================
@@ -51,13 +56,8 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import gdown
 
-# Email 相關模組
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-
 # 設定 Matplotlib 後端
-plt.switch_backend('Agg')
+plt.switch_backend('Agg') 
 
 # ==========================================
 # Google API 函式庫導入預檢
@@ -108,7 +108,7 @@ class ResourceManager:
         self.base_path = ""
         self.is_colab = self._detect_colab()
         self.is_github = os.environ.get('GITHUB_ACTIONS') == 'true'
-
+        
         self.SCOPES = [
             'https://www.googleapis.com/auth/drive.file',
             'https://www.googleapis.com/auth/spreadsheets.readonly',
@@ -119,7 +119,7 @@ class ResourceManager:
             self._setup_colab_paths()
         else:
             self.base_path = os.getcwd()
-
+            
         if HAS_GCP_LIBS:
             self._authenticate_services()
 
@@ -141,7 +141,7 @@ class ResourceManager:
         creds = None
         token_path = os.path.join(self.base_path, 'token.json')
         cred_path = os.path.join(self.base_path, 'credentials.json')
-
+        
         if os.path.exists(token_path):
             try: creds = Credentials.from_authorized_user_file(token_path, self.SCOPES)
             except: creds = None
@@ -154,11 +154,11 @@ class ResourceManager:
                 try:
                     creds.refresh(Request())
                 except: creds = None
-
+            
             if not creds:
                 if self.is_github:
                     print(">>> [系統] GitHub Actions 模式：Token 失效，跳過雲端授權。")
-                    return
+                    return 
                 if not os.path.exists(cred_path):
                     print(">>> [系統] 找不到憑證檔案，使用純本地模式。")
                     return
@@ -172,11 +172,11 @@ class ResourceManager:
                     creds = flow.credentials
                 else:
                     creds = flow.run_local_server(port=0)
-
+            
             if creds:
                 with open(token_path, 'w') as token:
                     token.write(creds.to_json())
-
+        
         try:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.gmail_service = build('gmail', 'v1', credentials=creds)
@@ -205,7 +205,7 @@ class ResourceManager:
                     print(f">>> [系統] 從本地環境載入設定: {filename}")
                     return json.load(f)
             except: pass
-
+        
         fid = getattr(self, 'folder_id', None)
         if self.drive_service and fid:
             try:
@@ -225,7 +225,7 @@ class ResourceManager:
     def save_file_to_drive(self, filename, data):
         content = ""
         mimetype = 'application/json'
-        if isinstance(data, pd.DataFrame):
+        if isinstance(data, pd.DataFrame): 
             content = data.to_csv(index=False, encoding='utf-8-sig')
             mimetype = 'text/csv'
         else:
@@ -287,11 +287,11 @@ class HybridInvestSystem:
         self.rm = ResourceManager()
         self.xtai = mcal.get_calendar('XTAI')
         self.config = self._init_config()
-        self.rate_cache = {} # 匯率快取
+        self.rate_cache = {}
 
     def _init_config(self):
         default_conf = {
-            "transaction_csv_url": "",
+            "transaction_csv_url": "", 
             "backtest_start_date": "2020-01-01",
             "monthly_budget": 20000,
             "cash_pool_ratio": 0.1,
@@ -299,8 +299,8 @@ class HybridInvestSystem:
             "email_config": {"enable": True, "receiver_email": ""},
             "targets": {
                 "00808.TW": {"ratio": 0.3, "mode": "TECH", "name": "華南永昌優選50"},
-                "AAPL": {"ratio": 0.3, "mode": "PYRAMID", "name": "Apple Inc."},
-                "USD-TD": {"ratio": 0.1, "mode": "ACTIVE", "name": "美金定存"}
+                "00895.TW": {"ratio": 0.3, "mode": "PYRAMID", "name": "富邦智慧車"},
+                "00679B.TWO": {"ratio": 0.3, "mode": "ACTIVE", "name": "元大美債20年"}
             },
             "pyramid_levels": {
                 "S1": {"drop": -0.15, "mult": 1.0}, "S2": {"drop": -0.25, "mult": 1.5}, "S3": {"drop": -0.35, "mult": 2.0}
@@ -309,6 +309,8 @@ class HybridInvestSystem:
         conf = self.rm.load_local_config() or default_conf
         for k, v in default_conf.items():
             if k not in conf: conf[k] = v
+        if "fee_discount" not in conf: conf["fee_discount"] = 1
+        
         if not os.environ.get('GITHUB_ACTIONS'):
             self.rm.save_file_to_drive("config.json", conf)
         return conf
@@ -316,34 +318,33 @@ class HybridInvestSystem:
     def get_currency_and_rate(self, ticker, is_fixed=False):
         """
         判斷幣別並獲取對台幣匯率
-        Returns: (currency_code, rate_to_twd)
         """
         # 1. 判斷幣別代碼
         if str(ticker).endswith('.TW') or str(ticker).endswith('.TWO') or str(ticker) == 'TWD':
             return 'TWD', 1.0
-
+        
         currency = 'USD' # 預設美金
-
+        
         if is_fixed:
-            # 定存類：移除 -TD 後綴 (e.g. USD-TD -> USD)
+            # 定存類：移除 -TD 後綴
             if str(ticker).endswith('-TD'):
                 currency = str(ticker).replace('-TD', '')
-            elif str(ticker) in ['TWD-TD']: # 特例
+            elif str(ticker) in ['TWD-TD']:
                 return 'TWD', 1.0
         else:
-            # 股票類：若無 .TW 則視為美股/外幣
             currency = 'USD'
 
-        # 2. 獲取匯率 (使用快取)
+        # 2. 獲取匯率
         if currency == 'TWD': return 'TWD', 1.0
-
-        if currency in self.rate_cache:
-            return currency, self.rate_cache[currency]
-
-        # Yahoo Finance 匯率代碼規則: USD -> TWD=X, JPY -> JPYTWD=X
+        if currency in self.rate_cache: return currency, self.rate_cache[currency]
+        
         yahoo_symbol = f"TWD=X" if currency == 'USD' else f"{currency}TWD=X"
         try:
             rate_data = yf.download(yahoo_symbol, period="1d", progress=False)
+            # [修正點] 確保匯率也是單一浮點數
+            if isinstance(rate_data.columns, pd.MultiIndex):
+                rate_data.columns = rate_data.columns.get_level_values(0)
+            
             if not rate_data.empty:
                 rate = float(rate_data['Close'].iloc[-1])
                 self.rate_cache[currency] = rate
@@ -351,8 +352,8 @@ class HybridInvestSystem:
                 return currency, rate
         except Exception as e:
             print(f">>> [警告] 無法取得 {currency} 匯率: {e}")
-
-        return currency, 1.0 # 失敗時回傳1
+        
+        return currency, 1.0
 
     def calculate_ema_talib(self, series, span):
         values = series.values
@@ -368,27 +369,27 @@ class HybridInvestSystem:
     def calculate_indicators(self, df):
         df = df.sort_index()
         price = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
-
+        
         ema12 = self.calculate_ema_talib(price, 12)
         ema26 = self.calculate_ema_talib(price, 26)
         df['DIF'] = ema12 - ema26
         df['DEA'] = self.calculate_ema_talib(df['DIF'].dropna(), 9)
         df['DEA'] = df['DEA'].reindex(df.index)
         df['OSC'] = df['DIF'] - df['DEA']
-
+        
         low9 = df['Low'].rolling(window=9).min()
         high9 = df['High'].rolling(window=9).max()
         rsv = (price - low9) / (high9 - low9) * 100
         df['K'] = rsv.ewm(com=2, adjust=False).mean()
         df['D'] = df['K'].ewm(com=2, adjust=False).mean()
-
+        
         df_w = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last'})
         w_low = df_w['Low'].rolling(window=9).min()
         w_high = df_w['High'].rolling(window=9).max()
         w_rsv = (df_w['Close'] - w_low) / (w_high - w_low) * 100
         df_w['WK'] = w_rsv.ewm(com=2, adjust=False).mean()
         df = df.join(df_w[['WK']], how='left').ffill()
-
+        
         for m in [20, 60, 120]: df[f'MA{m}'] = price.rolling(window=m).mean()
         return df
 
@@ -401,24 +402,22 @@ class HybridInvestSystem:
         last = df.iloc[-1]
         prev = df.iloc[-2]
         idx = df.index.get_loc(today)
-
+        
         suggestion = "觀望"
         invest_amt = 0
-
-        # 基礎投資
+        
         month_base_invested = portfolio_status.get("month_base_invested", 0)
         remaining_base = max(0, base_alloc - month_base_invested)
-
+        
         if remaining_base > 100:
             sched = self.xtai.schedule(start_date=today, end_date=today + timedelta(days=10))
             is_last_day = (sched.index[0].month != sched.index[1].month) if len(sched) > 1 else True
-
             has_dc = False
             for lb in range(1, 4):
                 if idx-lb<0: continue
                 if df.iloc[idx-lb]['DIF'] > df.iloc[idx-lb]['DEA'] and df.iloc[idx-lb+1]['DIF'] < df.iloc[idx-lb+1]['DEA']:
                     has_dc = True; break
-
+            
             tech_trigger = (has_dc and last['Close'] < prev['Close'] and last['OSC'] < 0)
             if tech_trigger:
                 suggestion = "建議基礎投資 (技術)"; invest_amt += remaining_base
@@ -433,18 +432,13 @@ class HybridInvestSystem:
                 if not (last['OSC'] < 0): reasons.append("OSC正")
                 suggestion = f"觀望 ({'/'.join(reasons)})"
 
-        # 加碼投資
         executed_extra = portfolio_status.get("executed_extra", [])
-        # 平均成本需還原回原幣別 (因為技術分析用原幣)
-        # avg_cost_twd = portfolio_status.get("avg_cost", 0)
-        # 但這裡的 df 也是原幣，所以我們要用原幣成本比較
-        # 修正: portfolio_status 傳入時應為 TWD，這裡除以匯率還原
         avg_cost_original = portfolio_status.get("avg_cost", 0) / rate if rate > 0 else 0
-
         mode = t_conf["mode"]
+        
         extra_amt = 0
         extra_reason = ""
-
+        
         if mode == "PYRAMID" and avg_cost_original > 0:
             drop = (last['Close'] - avg_cost_original) / avg_cost_original
             for s_name, s_cfg in self.config["pyramid_levels"].items():
@@ -477,7 +471,7 @@ class HybridInvestSystem:
                             else:
                                 extra_reason = f"{ma}加碼(資金不足)"
                             break
-
+        
         if extra_amt > 0:
             invest_amt += extra_amt
             if "建議" in suggestion: suggestion += f" & {extra_reason}"
@@ -514,9 +508,9 @@ class HybridInvestSystem:
                 df = data_map[t]
                 if date not in df.index: continue
                 price = df.loc[date, 'Close']
+                prev_price = df.iloc[df.index.get_loc(date)-1]['Close']
                 t_conf = self.config["targets"][t]
                 base_budget = budget * t_conf["ratio"]
-                # 簡化：回測暫不模擬多幣別匯率波動，皆視為 TWD
                 if not month_base_done[t]:
                     is_last = (date.month != (date + timedelta(days=5)).month)
                     idx = df.index.get_loc(date)
@@ -524,10 +518,9 @@ class HybridInvestSystem:
                     for i in range(3):
                         check_idx = idx - i
                         if check_idx <= 0: continue
-                        if df.iloc[check_idx-1]['DIF'] > df.iloc[check_idx-1]['DEA'] and \
-                           df.iloc[check_idx]['DIF'] < df.iloc[check_idx]['DEA']:
+                        if df.iloc[check_idx-1]['DIF'] > df.iloc[check_idx-1]['DEA'] and df.iloc[check_idx]['DIF'] < df.iloc[check_idx]['DEA']:
                             has_dc = True; break
-                    tech = (has_dc and price < df.iloc[idx-1]['Close'] and df.loc[date, 'OSC'] < 0)
+                    tech = (has_dc and price < prev_price and df.loc[date, 'OSC'] < 0)
                     if tech or is_last:
                         sh = base_budget / price
                         portfolio[t]["shares"] += sh
@@ -573,16 +566,14 @@ class HybridInvestSystem:
             if type_cols:
                 for col in type_cols:
                     is_fixed |= df[col].astype(str).str.contains('定存', na=False)
-
-            # 定存邏輯：市值 = 股數(外幣) * 匯率(價格欄位)
-            # 若為台幣定存(TWD-TD)，價格=1
+            
             if price_col:
                 df['RowMV'] = 0.0
                 df.loc[is_fixed, 'RowMV'] = df.loc[is_fixed, '股數'] * df.loc[is_fixed, price_col]
                 war_chest_mv = df.loc[is_fixed, 'RowMV'].sum()
             else:
                 war_chest_mv = df.loc[is_fixed, '金額'].sum()
-
+            
             cash_tickers = set(df[is_fixed]['標的'].unique())
             cash_tickers.add('定存'); cash_tickers.add('CASH')
         else:
@@ -593,9 +584,8 @@ class HybridInvestSystem:
         if mode == "REAL" and 'RowMV' in df.columns: aggs["RowMV"] = "sum"
         summary = df.groupby("標的").agg(aggs).reset_index()
         summary['MarketValue'] = 0.0
-        summary['Price'] = 0.0
         now = datetime.now()
-
+        
         conf_html = f"""<div style='background-color:#f9f9f9; padding:10px; margin-bottom:15px; border-radius:5px; font-size:13px; color:#555;'>
             <b>📊 系統參數：</b><br>• 每月預算: {self.config['monthly_budget']:,.0f}<br>• 策略配置:<br>"""
         for t, c in self.config["targets"].items():
@@ -604,38 +594,29 @@ class HybridInvestSystem:
 
         for idx, row in summary.iterrows():
             ticker = row['標的']
-            # 1. 判斷幣別 & 獲取匯率
-            is_fd = ticker in cash_tickers or ticker.upper() == 'CASH'
-            currency, rate = self.get_currency_and_rate(ticker, is_fixed=is_fd)
-
-            # 2. 定存計算
-            if is_fd:
+            if ticker in cash_tickers or ticker.upper() == 'CASH':
                 if mode == "REAL" and 'RowMV' in summary.columns:
                     summary.at[idx, 'MarketValue'] = row['RowMV']
                 else:
                     summary.at[idx, 'MarketValue'] = war_chest_sim
-                summary.at[idx, 'Price'] = rate # 顯示匯率作為定存價格
-
-            # 3. 股票計算 (美股需乘匯率)
+                summary.at[idx, 'Price'] = 1.0
             else:
+                # 這裡僅處理預設股票價格，稍後針對不同幣別會覆寫
                 try:
                     curr_data = yf.download(ticker, period="max", progress=False)
                     if isinstance(curr_data.columns, pd.MultiIndex):
                         curr_data.columns = curr_data.columns.get_level_values(0)
-                    # 原幣價格
-                    raw_price = float(curr_data['Close'].iloc[-1]) if not curr_data.empty else 0
-
-                    # 換算台幣
-                    summary.at[idx, 'Price'] = raw_price * rate
-                    summary.at[idx, 'MarketValue'] = row['股數'] * raw_price * rate
-                except:
-                    summary.at[idx, 'Price'] = 0
+                    price = float(curr_data['Close'].iloc[-1]) if not curr_data.empty else 0
+                except: price = 0
+                summary.at[idx, 'Price'] = price
+                summary.at[idx, 'MarketValue'] = row['股數'] * price
 
         chart_bytes = self.generate_chart(summary, cash_tickers)
+
         html = f"<h2>智投報告 [{mode}] - {now.strftime('%Y-%m-%d')}</h2>{conf_html}"
         html += '<img src="cid:portfolio_chart" alt="Portfolio Chart" style="max-width:100%;"><br><hr>'
         html += "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%; font-family: Arial; font-size: 13px;'>"
-        html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值(TWD)</th><th>報酬率</th><th>DIF</th><th>OSC</th><th>K(日/週)</th>"
+        html += "<tr style='background:#f2f2f2;'><th>標的</th><th>股數</th><th>市值(TWD)</th><th>報酬率</th><th>淨利(預估)</th><th>淨報酬%</th>"
         if mode == "REAL": html += "<th>今日建議</th><th>金額</th><th>股數</th>"
         html += "</tr>"
 
@@ -649,40 +630,29 @@ class HybridInvestSystem:
             cost = row.iloc[0]['金額'] if not row.empty else 0
             shares = row.iloc[0]['股數'] if not row.empty else 0
             mv = row.iloc[0]['MarketValue'] if not row.empty else 0
-            roi = (mv - cost) / cost * 100 if cost > 0 else 0
-            total_cost += cost; total_mv += mv
-
+            
             is_fd = ticker in cash_tickers
             suggestion = "-"; sugg_amt_str = "-"; sugg_shares_str = "-"; dif_d = "-"; osc_d = "-"; k_d = "-"
 
-            # 淨損益
-            tax_rate = 0.0
-            if is_fd: tax_rate = 0.0
-            elif str(ticker).startswith("00") or "ETF" in str(ticker):
-                tax_rate = 0.0 if ("債" in str(ticker) or "B" in str(ticker)) else 0.001
-            else: tax_rate = 0.003
-
-            # 手續費 & 稅 (用台幣市值算)
-            handling_fee = 0 if is_fd else (mv * 0.001425 * fee_discount)
-            trans_tax = mv * tax_rate
-            net_profit = (mv - cost) - handling_fee - trans_tax
-            net_roi = (net_profit / cost * 100) if cost > 0 else 0
-
+            # [修正] 針對股票類，進行匯率換算與指標計算
             if mode == "REAL" and not is_fd:
                 try:
-                    # 取得匯率
-                    curr, rate = self.get_currency_and_rate(ticker)
+                    currency, rate = self.get_currency_and_rate(ticker)
                     hist_data = yf.download(ticker, period="max", progress=False)
                     if isinstance(hist_data.columns, pd.MultiIndex): hist_data.columns = hist_data.columns.get_level_values(0)
                     if not hist_data.empty:
-                        raw_price = float(hist_data['Close'].iloc[-1])
-                        # 技術指標用原幣算
+                        curr_price_raw = float(hist_data['Close'].iloc[-1])
+                        # 覆寫為正確的台幣市值與顯示價格 (原幣股價 * 匯率)
+                        summary.at[summary.index[summary['標的'] == ticker][0], 'Price'] = curr_price_raw * rate
+                        mv = shares * curr_price_raw * rate
+                        summary.at[summary.index[summary['標的'] == ticker][0], 'MarketValue'] = mv
+                        
                         hist_data = self.calculate_indicators(hist_data)
                         last = hist_data.iloc[-1]
-
+                        
                         dif_val = last['DIF']; osc_val = last['OSC']
-                        dif_d = f"<span style='color:{'red' if dif_val>0 else 'green'}'>{dif_val:.4f}</span>"
-                        osc_d = f"<span style='color:{'red' if osc_val>0 else 'green'}'>{osc_val:.4f}</span>"
+                        dif_d = f"{dif_val:.4f}"
+                        osc_d = f"{osc_val:.4f}"
                         k_d = f"{last['K']:.0f} / {last['WK']:.0f}"
 
                         col_type = next((c for c in ['策略', '類別', '類型'] if c in df.columns), None)
@@ -695,28 +665,48 @@ class HybridInvestSystem:
                                  t_str = str(t)
                                  if "金字塔" in t_str: extra_types.append(t_str.split('_')[-1])
                                  if "技術" in t_str or "K值" in t_str: extra_types.append("K_OVER" if "K值" in t_str else t_str)
-                                 if "加碼" in t_str and "MA" in t_str: extra_types.append(t_str)
+                                 if "加碼" in t_str and "MA" in t_str: extra_types.append(t_str) 
 
-                        # 策略運算 (傳入台幣成本, 內部除以匯率還原)
                         sugg_text, sugg_val_twd = self.evaluate_strategy_today(ticker, hist_data, war_chest_mv, {"month_base_invested": month_base, "executed_extra": extra_types, "avg_cost": cost/shares if shares>0 else 0}, rate)
                         suggestion = sugg_text
                         if sugg_val_twd > 0:
                             sugg_amt_str = f"{sugg_val_twd:,.0f}"
-                            # 建議股數 = 建議金額(TWD) / 匯率 / 原幣股價
-                            est_shares = int(sugg_val_twd / rate / raw_price)
-                            sugg_shares_str = f"{est_shares}"
+                            sugg_shares_str = f"{int(sugg_val_twd / rate / curr_price_raw)}"
+                        
+                        print(f"{ticker:<10} {shares:>8.0f} {mv:>10,.0f} {((mv-cost)/cost*100) if cost>0 else 0:>7.2f}% DIF:{dif_val:.4f} OSC:{osc_val:.4f} {suggestion:<10}")
 
-                        print(f"{ticker:<10} {shares:>8.0f} {mv:>10,.0f} {roi:>7.2f}% (淨{net_roi:.2f}%) DIF:{dif_val:.4f} OSC:{osc_val:.4f} {suggestion:<10}")
                 except: pass
+            
+            # 針對定存類，僅顯示資產 (已在上方循環計算過市值)
+            elif is_fd:
+                 print(f"[{ticker}] (定存) 股數:{shares:,.0f} 市值:{mv:,.0f}")
 
+            roi = (mv - cost) / cost * 100 if cost > 0 else 0
+            total_cost += cost
+            total_mv += mv
+            
+            # 淨損益
+            tax_rate = 0.0
+            if is_fd: tax_rate = 0.0
+            elif str(ticker).startswith("00") or "ETF" in str(ticker):
+                tax_rate = 0.0 if ("債" in str(ticker) or "B" in str(ticker)) else 0.001
+            else: tax_rate = 0.003
+            
+            handling_fee = 0 if is_fd else (mv * 0.001425 * fee_discount)
+            trans_tax = mv * tax_rate
+            net_profit = (mv - cost) - handling_fee - trans_tax
+            net_roi = (net_profit / cost * 100) if cost > 0 else 0
+            
             roi_color = "red" if roi > 0 else "green"
+            net_color = "red" if net_roi > 0 else "green"
+            
             html += f"<tr><td>{ticker}</td><td>{shares:,.0f}</td><td>{mv:,.0f}</td><td style='color:{roi_color}'>{roi:+.2f}%</td>"
-            html += f"<td align='center'>{dif_d}</td><td align='center'>{osc_d}</td><td align='center'>{k_d}</td>"
+            html += f"<td style='color:{net_color}'>{net_profit:,.0f}</td><td style='color:{net_color}'>{net_roi:+.2f}%</td>"
             if mode == "REAL":
                 if is_fd: html += "<td align='center'>-</td><td align='center'>-</td><td align='center'>-</td>"
                 else: html += f"<td>{suggestion}</td><td>{sugg_amt_str}</td><td>{sugg_shares_str}</td>"
             html += "</tr>"
-
+        
         cash_cost_total = 0
         if mode == "REAL":
             type_cols = [c for c in ['策略', '類別', '類型'] if c in df.columns]
@@ -725,14 +715,16 @@ class HybridInvestSystem:
             cash_cost_total = df.loc[is_fixed_agg, '金額'].sum()
         else: cash_cost_total = war_chest_sim
 
-        total_mv += war_chest_mv
-        total_cost += cash_cost_total
+        # total_mv 已經累加了定存市值 (war_chest_mv)
+        # total_cost 已經累加了定存成本 (cash_cost_total)
+        # 故無需額外動作
+
         tot_roi = (total_mv - total_cost) / total_cost * 100 if total_cost > 0 else 0
         html += f"</table><br><b>總投入成本:</b> {total_cost:,.0f} TWD<br>"
         html += f"<b>總資產市值:</b> {total_mv:,.0f} TWD (帳面: <span style='color:{'red' if tot_roi>0 else 'green'}'>{tot_roi:+.2f}%</span>)<br>"
         wc_display = war_chest_mv if mode == "REAL" else war_chest_sim
         html += f"<b>加碼金餘額 (定存市值):</b> <span style='color:blue'>{wc_display:,.0f} TWD</span><br>"
-
+        
         email_conf = self.config.get("email_config", {})
         if email_conf.get("enable") and email_conf.get("receiver_email"):
             self.rm.send_email_with_chart(email_conf["receiver_email"], f"智投報告 - {now.strftime('%Y-%m-%d')}", html, chart_bytes)
